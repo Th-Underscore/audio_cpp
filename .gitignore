@@ -1,0 +1,11 @@
+# user-specific persisted config (created by the Save button)
+config.json
+config.json.tmp
+
+# runtime artifacts
+outputs/
+*.log
+*.7z
+
+__pycache__/
+*.pyc

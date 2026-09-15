@@ -1,0 +1,6 @@
+# audio_cpp extension has no hard Python dependencies beyond stdlib + gradio
+# (already a textgen dependency). The finished-reply .ogg encoding shells out
+# to `ffmpeg` (libopus); if ffmpeg is absent, streaming still works and the
+# save-file step is skipped with a warning.
+#
+# No pip installs required.
