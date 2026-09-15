@@ -22,8 +22,9 @@ Endpoints:
     GET /voice/active
     GET /voice/models
     GET /voice/voices?model=
-    GET /voice/stream?chat=<id>      SSE relay of the live session
-    GET /voice/file?path=<rel>       finished opus files (outputs/ dir)
+    GET  /voice/stream?chat=<id>     SSE relay of the live session
+    GET  /voice/file?path=<rel>      finished opus files (outputs/ dir)
+    POST /voice/stop?chat=<id>       HARD stop: abort in-flight TTS now
 """
 
 import json
@@ -70,7 +71,8 @@ def _dbg(msg):
 # VoiceSession
 # --------------------------------------------------------------------------
 class VoiceSession:
-    def __init__(self, chat_id, cfg, on_file=None, thinking_end_tag=""):
+    def __init__(self, chat_id, cfg, on_file=None, thinking_end_tag="",
+                 cancel_event=None):
         self.chat_id = chat_id
         self.cfg = cfg                       # dict of current extension settings
         self.on_file = on_file               # optional cb(path) when file saved
@@ -88,6 +90,11 @@ class VoiceSession:
         self.out_q = queue.Queue()
         self._lock = threading.Lock()
         self._cancelled = False
+        # Set by interrupt() (POST /voice/stop): client.stream_tts checks it
+        # between deltas and closes the in-flight audio.cpp connection.
+        # Owned by the session by default; a caller may pass its own Event.
+        self.cancel_event = (cancel_event if cancel_event is not None
+                             else threading.Event())
         self.ts = time.time()
         self.done_event = threading.Event()
         self._worker = threading.Thread(target=self._run, daemon=True)
@@ -148,13 +155,46 @@ class VoiceSession:
         self.in_q.put(_END)
 
     def cancel(self):
-        """Stop = drain: no new chunks, finish in-flight work, then close."""
+        """DRAIN stop (the tap's GeneratorExit path: textgen Stop/Regenerate):
+        flush the chunker tail, let the worker finish the in-flight TTS
+        chunk, then close. Audio already relayed plays to the end."""
         with self._lock:
             self._cancelled = True
             tail = self.chunker.flush()
         for c in tail:
             self.in_q.put(c)
         self.in_q.put(_END)
+
+    def interrupt(self):
+        """HARD stop (browser stop button -> POST /voice/stop): abort NOW.
+
+        Sets `cancel_event` (the in-flight client.stream_tts drops the
+        audio.cpp connection at the next delta boundary), marks cancelled so
+        every queued chunk is skipped, drains in_q, and emits a terminal
+        `stopped` event on out_q so the browser SSE finalizes the playhead
+        immediately. done_event is set here (not by the worker) so the
+        caller's join is bounded; the worker's terminal `done` is a no-op
+        because it only fires after the _END that interrupt() pushed, and
+        _cancelled makes the worker skip straight to it.
+
+        Idempotent: safe to call after the worker finished normally.
+        """
+        with self._lock:
+            self._cancelled = True
+        # Drop every queued chunk (don't synthesize the rest of the reply).
+        while True:
+            try:
+                self.in_q.get_nowait()
+            except queue.Empty:
+                break
+        self.cancel_event.set()
+        self.in_q.put(_END)
+        _dbg("[session %s] INTERRUPTED (hard stop): in-flight TTS abort, "
+             "queued chunks dropped" % self.chat_id)
+        # Terminal event: the SSE route converts ("stopped", None) into a
+        # `done` with a null file (no opus file exists mid-reply) and breaks.
+        self.out_q.put(("stopped", None))
+        self.done_event.set()
 
     # -- worker thread -------------------------------------------------------
     def _run(self):
@@ -190,6 +230,7 @@ class VoiceSession:
                     voice=self.cfg.get("voice") or None,
                     seed=self._seed(),
                     timeout=int(self.cfg.get("request_timeout", 120)),
+                    cancel_event=self.cancel_event,
                 ):
                     pcm_total.extend(pcm)
                     self.out_q.put(("audio", b64(pcm)))
@@ -423,10 +464,15 @@ def make_routes(sessions: Dict[str, VoiceSession],
                             file_url = "/voice/file?path=%s" % urllib.parse.quote(
                                 os.path.basename(payload))
                         ev = {"type": "done", "file": file_url}
+                    elif kind == "stopped":
+                        # Hard stop (interrupt()): terminal, no file (no opus
+                        # file exists mid-reply). The browser finalizes the
+                        # playhead and inserts its replayer.
+                        ev = {"type": "done", "file": None, "stopped": True}
                     else:
                         continue
                     yield ("data: " + json.dumps(ev) + "\n\n").encode("utf-8")
-                    if kind == "done":
+                    if kind in ("done", "stopped"):
                         break
             except Exception:
                 # generator abandoned (browser navigated away) — log it so a
@@ -442,6 +488,16 @@ def make_routes(sessions: Dict[str, VoiceSession],
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @router.post("/voice/stop")
+    def stop(chat: str = Query(default=None)):
+        """HARD stop: abort the in-flight TTS of the given session NOW
+        (queued chunks dropped, in-flight request aborted)."""
+        if not chat or chat not in sessions:
+            return JSONResponse(status_code=404,
+                                 content={"ok": False, "error": "no session"})
+        sessions[chat].interrupt()
+        return {"ok": True, "stopped": chat}
 
     @router.get("/voice/file")
     def serve_file(path: str = Query(default=None)):

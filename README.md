@@ -5,7 +5,8 @@ Streams TTS for text generated in oobabooga's text-generation-webui, synthesized
 ## Quick features
 
 - Streams audio while text is produced by the model (sentence/paragraph chunking mid-generation)
-- Toggle on/off from the UI; finished replies are saved as `.ogg` and appended to the message
+- Toggle on/off from the UI; finished replies are saved as `.ogg` and appended to the bot message (the player tracks the message by `data-index`, so the attachment stays on its message across re-renders and version navigation)
+- **Stop voice** button (floating, bottom-right) appears while audio is in flight — hard-interrupts the in-flight synthesis (drops the audio.cpp connection and queued chunks) and stops playback
 - Per-model synthesis options (temperature, top_k/p, guidance, streaming, …) with a **Save** button — persisted to `config.json` and reloaded at startup
 - Voice library auto-fill: pick a voice (`*.wav` + `prompt_text` in the voice dir) and `reference_text` is filled from the prompt
 - Any audio.cpp family supported (`/v1/models` drives the dropdown) — TTS, music, effects, …
@@ -39,6 +40,7 @@ git clone https://github.com/Th-Underscore/audio_cpp.git
     - pick a TTS model + voice
     - toggle **Enable voicing of bot replies**
 3. Generate — audio streams in and the saved `.ogg` appears on the bot message
+4. Mid-synthesis, **Stop voice** aborts the TTS immediately (vs. textgen's Stop/Regenerate, which let the in-flight chunk drain)
 
 ## Configuration
 

@@ -93,6 +93,7 @@
             if (closed) return;
             closed = true;
             console.warn("[audio_cpp] player: stream error/close, deltas=%d", nDeltas);
+            hideStopBtn();
             allowReattach(chatId);
         };
         es.onmessage = (e) => {
@@ -100,6 +101,7 @@
                 console.log("[audio_cpp] player: [DONE] after %d deltas", nDeltas);
                 closed = true;
                 es.close();
+                hideStopBtn();
                 allowReattach(chatId);
                 return;
             }
@@ -120,11 +122,18 @@
             } else if (ev.type === "done") {
                 closed = true;
                 es.close();
+                hideStopBtn();
+                if (ev.stopped) {
+                    // Hard stop: no opus file exists; nothing to replay.
+                    current = null;
+                    return;
+                }
                 if (onDone) onDone(ev.file || null);
             } else if (ev.type === "error") {
                 console.warn("[audio_cpp] relay error:", ev.error);
                 closed = true;
                 es.close();
+                hideStopBtn();
                 allowReattach(chatId);
             }
         };
@@ -135,19 +144,65 @@
         if (!fileUrl) return;
         // Resolve same-origin relative file URLs against the app origin.
         if (fileUrl.startsWith("/")) fileUrl = window.location.origin + fileUrl;
-        // Newest completed message in the chat history.
+        // Newest completed assistant message. Keyed by data-index so the
+        // replayer is sticky across re-renders and never duplicated: the
+        // target .message already carries a data-audiocpp="1" marker.
         const msgs = document.querySelectorAll("#right-side .message.response, .message.response");
-        const target = msgs.length ? msgs[msgs.length - 1] : document.querySelector("#right-side");
+        let target = null;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            if (!msgs[i].dataset.audiocpp) { target = msgs[i]; break; }
+        }
+        if (!target) target = msgs.length ? msgs[msgs.length - 1] : document.querySelector("#right-side");
         if (!target) return;
         const holder = target.querySelector(".msg") || target;
+        // Drop any stale player on this holder, then add the new one.
+        const old = holder.querySelector("audio.audio-cpp-player");
+        if (old) old.remove();
         const a = document.createElement("audio");
         a.controls = true;
         a.className = "audio-cpp-player";
         a.src = fileUrl;
         holder.appendChild(a);
+        // Mark the owning message so a future done/stop doesn't double-insert.
+        target.dataset.audiocpp = "1";
     }
 
-    let current = null; // {chatId, seen: Set}
+    let current = null; // {chatId, es, stopBtn}
+
+// --- Stop button -----------------------------------------------------------
+let stopBtn = null;
+function ensureStopBtn() {
+    if (stopBtn) return stopBtn;
+    stopBtn = document.createElement("button");
+    stopBtn.id = "audio-cpp-stop";
+    stopBtn.textContent = "■ Stop voice";
+    stopBtn.className = "audio-cpp-stop-btn";
+    stopBtn.style.cssText =
+        "position:fixed;bottom:24px;right:24px;z-index:9999;" +
+        "background:#c0392b;color:#fff;border:none;border-radius:8px;" +
+        "padding:10px 18px;font-size:14px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.35);";
+    stopBtn.addEventListener("click", () => {
+        if (!current || !current.chatId) return;
+        console.log("[audio_cpp] stop button: stopping", current.chatId);
+        fetch(RELAY_HOST + "/voice/stop?chat=" + encodeURIComponent(current.chatId),
+              { method: "POST" })
+            .then(r => r.json())
+            .then(j => console.log("[audio_cpp] stop:", j))
+            .catch(e => console.warn("[audio_cpp] stop failed:", e));
+    });
+    document.body.appendChild(stopBtn);
+    return stopBtn;
+}
+function showStopBtn(chatId) {
+    ensureStopBtn();
+    stopBtn.style.display = "";
+    stopBtn.textContent = "■ Stop voice";
+    stopBtn.dataset.chat = chatId;
+}
+function hideStopBtn() {
+    if (stopBtn) stopBtn.style.display = "none";
+}
+// --- Stop button end --------------------------------------------------------
 
     let pollFailures = 0;
 
@@ -162,14 +217,24 @@
             pollFailures = 0;
             const j = await r.json();
             const active = j.ok ? j.active : null;
-            if (!active) return;
+            if (!active) {
+                // No in-flight session: retract the stop button.
+                if (current) { current = null; hideStopBtn(); }
+                return;
+            }
             if (current && current.chatId === active) return;
+            // New session: close any stale stream from a previous one.
+            if (current && current.es) {
+                try { current.es.close(); } catch (e) {}
+                current = null;
+            }
             console.log("[audio_cpp] player: new active session", active);
-            current = { chatId: active };
-            streamFor(active, (fileUrl) => {
+            const es = streamFor(active, (fileUrl) => {
                 console.log("[audio_cpp] player: session done, file=%s", fileUrl);
                 insertReplayer(fileUrl);
             });
+            current = { chatId: active, es };
+            showStopBtn(active);
         } catch (e) {
             pollFailures++;
             if (pollFailures === 1 || pollFailures % 40 === 0) {

@@ -119,14 +119,18 @@ def get_voices(server_url, model=None, timeout=10):
 
 
 def stream_tts(server_url, model, text, options=None, voice=None,
-               response_format="pcm", stream_format="sse", seed=None,
-               timeout=DEFAULT_TIMEOUT):
+                response_format="pcm", stream_format="sse", seed=None,
+                timeout=DEFAULT_TIMEOUT, cancel_event=None):
     """POST /v1/audio/speech and yield decoded PCM16 bytes per delta event.
 
     `options` is the audio.cpp `options` object (instruction, temperature,
     top_p, text_chunk_mode, text_chunk_size, stream_frames_per_event, ...).
     Yields raw PCM16-LE mono bytes. Stops at `speech.audio.done` or `[DONE]`.
     Raises on a non-200 HTTP status or an `error` SSE event.
+
+    `cancel_event` (threading.Event) — when set, the generator stops after
+    the in-flight read (connection closed) WITHOUT raising. Used by the
+    stop/interrupt button: the audio.cpp request is dropped mid-stream.
     """
     body = {
         "model": model,
@@ -162,6 +166,9 @@ def stream_tts(server_url, model, text, options=None, voice=None,
     n_pcm = 0
     t0 = time.time()
     try:
+        if cancel_event is not None and cancel_event.is_set():
+            _dbg("[tts] cancelled before request")
+            return
         with _req(server_url.rstrip("/") + "/v1/audio/speech",
                   body=body, timeout=timeout) as r:
             _dbg("[tts] HTTP %s %s ctype=%s len=%s"
@@ -200,6 +207,10 @@ def stream_tts(server_url, model, text, options=None, voice=None,
                     if n_delta == 1:
                         _dbg("[tts] first delta: %dB pcm" % len(pcm))
                     yield pcm
+                    if cancel_event is not None and cancel_event.is_set():
+                        _dbg("[tts] CANCELLED after %d deltas / %dB pcm "
+                             "(%.1fs)" % (n_delta, n_pcm, time.time() - t0))
+                        return
                 elif etype == "speech.audio.done":
                     _dbg("[tts] speech.audio.done after %d deltas / %dB pcm "
                          "(%.1fs)" % (n_delta, n_pcm, time.time() - t0))

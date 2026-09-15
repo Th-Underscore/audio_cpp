@@ -137,12 +137,23 @@ Browser SSE framing (relay → client), one JSON per `data:` line:
 {"type":"audio","b64":"..."}                          # PCM16 LE little-endian
 {"type":"chunk_done","chunk":n}
 {"type":"done","file":"file/..."|null}                # terminal; file = saved opus
+{"type":"done","file":null,"stopped":true}            # terminal (hard stop; no file)
 {"type":"error","message":...}
 ```
 
-**Stop behavior (user-confirmed: let it drain):** Stop/regenerate closes the
-feeder; the worker finishes the in-flight TTS chunk, emits `done`, the relay
-closes the client stream. No hard abort of upstream TTS.
+**Stop behavior (two paths):**
+- **Drain** (user-confirmed: let it drain) — Stop/regenerate closes the
+  feeder; the worker finishes the in-flight TTS chunk, emits `done`, the relay
+  closes the client stream. No hard abort of upstream TTS. (This is the
+  textgen Stop button / Regenerate path — `VoiceSession.cancel()`.)
+- **Hard interrupt** (browser "■ Stop voice" button) — `POST /voice/stop?chat=`
+  → `VoiceSession.interrupt()`: sets the session `cancel_event` (the in-flight
+  `client.stream_tts` drops the audio.cpp connection at the next delta
+  boundary), marks the session cancelled so every queued chunk is skipped,
+  drains `in_q`, and emits a terminal `stopped` event (surfaced to the browser
+  as `{"type":"done","file":null,"stopped":true}`). No opus file exists
+  mid-reply, so there is nothing to replay. The tap's own Stop/Regenerate path
+  is untouched (it stays drain).
 
 **Browser disconnect:** relay detects broken pipe on the client SSE, marks
 the stream stopped; the worker finishes the in-flight chunk (bounded) then
@@ -262,7 +273,10 @@ full pipeline).
    the reply completes, no gaps in playback, `done` event, opus file created
    and playable from the message-embedded player.
 4. Stop mid-generation → drains cleanly, no zombie worker, next reply reuses
-   the worker fine.
+    the worker fine.
+4b. Hard stop (browser "■ Stop voice") mid-synthesis → upstream TTS request
+    aborts, queued chunks drop, SSE finalizes with `stopped: true`, stop
+    button retracts, no opus file, next reply re-attaches cleanly.
 5. Regenerate a reply → fresh stream, no contamination from previous chunks.
 
 ## Phase 2 (explicitly out of scope now)
@@ -301,11 +315,14 @@ Implemented and unit-verified:
   `options` sub-object, `response_format: pcm`, `stream_format: sse`).
 - `relay.py` — ThreadingHTTPServer (CORS, superboogav2 pattern):
   `/voice/health`, `/voice/active` (newest in-flight session),
-  `/voice/stream?chat=` (SSE), `/voice/models`, `/voice/voices`,
-  `/voice/file?path=` (outputs dir, path-validated). Per-session worker
-  thread with TWO queues (in_q chunks / out_q events — no worker-vs-reader
-  race). Stop = drain, not abort. `done` event always emitted
-  (worker wrapped in try/finally on `done_event`).
+`/voice/stream?chat=` (SSE), `/voice/models`, `/voice/voices`,
+   `/voice/file?path=` (outputs dir, path-validated), `POST /voice/stop?chat=`
+   (hard interrupt → `VoiceSession.interrupt()`). Per-session worker thread
+   with TWO queues (in_q chunks / out_q events — no worker-vs-reader race).
+   Two stops: drain (tap Stop/Regenerate → `cancel()`) and hard interrupt
+   (`/voice/stop` → `interrupt()`, sets `cancel_event` + drains + terminal
+   `stopped` event). `done` event always emitted (worker wrapped in
+   try/finally on `done_event`).
 - `script.py` — `params` (is_tab: False → accordion in the shared
   extensions column), `setup()` (starts relay), `ui()` (accordion, all
   settings user-configurable; `.change` handlers persist to `audio_cfg`),
@@ -316,10 +333,18 @@ Implemented and unit-verified:
 - `player.js` — polls `/voice/active` every 250 ms; attaches to the live
   session SSE; WebAudio playhead scheduling (stream_client.py pattern,
   24 kHz AudioContext); on `done`, appends `<audio controls>` (the saved
-  .ogg) to the newest bot message.
+  .ogg) to the newest bot message (keyed by `data-index`, sticky across
+  re-renders via a `data-audiocpp` marker — never duplicated). Renders a
+  floating "■ Stop voice" button while a session is active; clicking it
+  POSTs `/voice/stop` (hard interrupt).
 - `tests/test_relay_smoke.py` — mock audio.cpp (SSE deltas) end-to-end:
   client parsing, relay endpoints, session pipeline (5 events, audio then
   done), ffmpeg libopus encode to .ogg. ALL PASS.
+- `tests/test_stop.py` — hard-stop path: `client.stream_tts(cancel_event)`
+  aborts mid-stream without raising; `POST /voice/stop` interrupts a live
+  session (in-flight TTS aborts, queued chunks skipped — TTS request count
+  frozen), SSE ends with `{"done","file":null,"stopped":true}`; 404 for an
+  unknown chat id. ALL PASS.
 - Full extension imports cleanly in the real textgen env
   (`importlib.import_module('extensions.audio_cpp.script')`).
 
