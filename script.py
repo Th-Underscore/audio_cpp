@@ -68,6 +68,7 @@ _DEFAULT_GLOBAL = {
     "chunk_mode": "sentence",
     "chunk_min_chars": 120,
     "chunk_max_chars": 400,
+    "chunk_tag_pairs": "",
     "strip_thinking": True,
     "strip_markdown": True,
     "strip_citations": True,
@@ -673,13 +674,17 @@ def ui():
 
         # -- chunking (client-side, global) ----------------------------------
         gr.Markdown("### Chunking (client-side)")
-        chunk_mode = gr.Dropdown(["sentence", "paragraph"],
+        chunk_mode = gr.Dropdown(["sentence", "paragraph-greedy", "paragraph-lazy"],
                                   value=audio_cfg["chunk_mode"],
                                   label="Chunk mode (client-side)")
         chunk_min_chars = gr.Number(value=audio_cfg["chunk_min_chars"],
                                      label="Min chars per chunk", precision=0)
         chunk_max_chars = gr.Number(value=audio_cfg["chunk_max_chars"],
                                      label="Max chars per chunk", precision=0)
+        chunk_tag_pairs = gr.Textbox(value=audio_cfg["chunk_tag_pairs"],
+                                      label="Chunk tag pairs (empty = defaults () [] <>; e.g. '[] <>')",
+                                      interactive=True,
+                                      elem_classes=["audio_cpp_narrow"])
 
         # -- text preprocessing (global) -------------------------------------
         gr.Markdown("### Text preprocessing (before TTS)")
@@ -709,6 +714,7 @@ def ui():
             sample_rate: "sample_rate", request_timeout: "request_timeout",
             chunk_mode: "chunk_mode", chunk_min_chars: "chunk_min_chars",
             chunk_max_chars: "chunk_max_chars",
+            chunk_tag_pairs: "chunk_tag_pairs",
             strip_thinking: "strip_thinking", strip_markdown: "strip_markdown",
             strip_citations: "strip_citations", save_file: "save_file",
             thinking_end_tag: "thinking_end_tag",
@@ -744,6 +750,7 @@ _COERCERS = {
     "enabled": bool, "server_url": str, "voice_dir": str, "model": str,
     "voice": str, "sample_rate": int, "request_timeout": int,
     "chunk_mode": str, "chunk_min_chars": int, "chunk_max_chars": int,
+    "chunk_tag_pairs": str,
     "strip_thinking": bool, "strip_markdown": bool, "strip_citations": bool,
     "save_file": bool, "thinking_end_tag": str,
     "temperature": float, "depth_temperature": float, "top_k": int,

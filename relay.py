@@ -82,6 +82,8 @@ class VoiceSession:
         self.chunker = chunker_mod.TextChunker(
             min_chars=cfg.get("chunk_min_chars", 120),
             max_chars=cfg.get("chunk_max_chars", 400),
+            mode=cfg.get("chunk_mode", "sentence"),
+            tag_pairs=cfg.get("chunk_tag_pairs", ""),
         )
         # TWO queues: the worker consumes `in_q` (chunks to synthesize) and
         # produces into `out_q` (audio/done events for the browser SSE).
