@@ -325,3 +325,33 @@ def test_tag_pairs_user_config():
 
 test_paren_tags_atomic_default()
 test_tag_pairs_user_config()
+
+
+def test_lazy_does_not_preempt_paragraphs():
+    # Regression: the lazy sentence-fallback used to fire the moment the
+    # buffer crossed min, BEFORE the next \n\n had arrived in the stream —
+    # closing at sentence boundaries and producing ragged sub-paragraph
+    # chunks. The fallback may now only fire once the buffer has passed
+    # max_chars, so closes land on real paragraph boundaries whenever one
+    # exists in [min, max].
+    #
+    # Para 1 is ~200 chars with early sentence boundaries at ~60/120: old
+    # code closed at 60/120 (sub-paragraph); it must close at the \n\n.
+    para1 = ("x" * 50 + ". " + "y" * 50 + ". " + "z" * 80)   # boundary at 192
+    para2 = "w" * 300                                          # no sentences
+    text = para1 + "\n\n" + para2
+    c = chunker.TextChunker(min_chars=120, max_chars=400, mode="paragraph-lazy")
+    out = []
+    for i in range(0, len(text), 7):
+        out += c.feed(text[:i])
+    out += c.feed(text); out += c.flush()
+    assert len(out) == 2, "expected 2 chunks, got %d: %s" % (len(out), [len(x) for x in out])
+    # chunk 1 = whole first paragraph, NOT a 51/103-char sentence cut
+    # inside it
+    assert out[0].startswith("x" * 50) and out[0].endswith("z" * 80), repr(out[0][-20:])
+    # chunk 2 = the whole second paragraph
+    assert out[1].startswith("w")
+    print("lazy-no-preempt ok: %d chunks, sizes %s" % (len(out), [len(x) for x in out]))
+
+
+test_lazy_does_not_preempt_paragraphs()

@@ -330,13 +330,19 @@ class TextChunker:
         end = self._oversized_sentence_end()
         if end is not None:
             return end
-        # No acceptable paragraph boundary: LAST sentence boundary in [min, max]
-        # (lazy: never close below min — sub-min sentences coalesce). No such
-        # boundary: keep accumulating (the flush emits the tail at end of
-        # reply, word-safe).
-        end = self._last_valid_boundary_in(find_sentence_end, self.min_chars, self.max_chars)
-        if end is not None:
-            return end
+        # No acceptable paragraph boundary so far. The sentence fallback may
+        # only fire once the buffer has passed max_chars: below max, a
+        # paragraph boundary may simply not have ARRIVED YET (streaming), so
+        # closing at a sentence here would preempt the next \n\n and produce
+        # ragged sub-paragraph chunks.
+        if len(buf) > self.max_chars:
+            # Confirmed: no paragraph boundary in [min, max]. LAST sentence
+            # boundary in [min, max] (lazy: never close below min — sub-min
+            # sentences coalesce). No such boundary: keep accumulating (the
+            # flush emits the tail at end of reply, word-safe).
+            end = self._last_valid_boundary_in(find_sentence_end, self.min_chars, self.max_chars)
+            if end is not None:
+                return end
         # A single over-long sentence stays whole up to the soft-max slack,
         # then closes at the last whitespace before max (never mid-word); the
         # tail stays buffered.
