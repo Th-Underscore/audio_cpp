@@ -313,7 +313,7 @@ def save_opus(pcm, sample_rate, dest):
         ffmpeg = os.environ.get("AUDIOCPP_FFMPEG", "ffmpeg")
         cmd = [ffmpeg, "-hide_banner", "-loglevel", "error",
                "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", "-i", "-",
-               "-c:a", "libopus", "-b:a", "32k", "-f", "ogg", dest]
+               "-c:a", "libopus", "-b:a", "64k", "-f", "ogg", dest]
         p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         out, err = p.communicate(input=bytes(pcm), timeout=120)
