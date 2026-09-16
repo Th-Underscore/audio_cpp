@@ -206,6 +206,20 @@ def _bare_model_id(label):
     return label
 
 
+def _model_value(choices, model_id):
+    """Map a saved bare model id (config.json 'model') to its dropdown label
+    (choices are 'id  [family]'); None when the model is not among the
+    discovered choices. Gradio requires value to exactly match a choice,
+    so the raw id alone would render the dropdown empty."""
+    if not model_id:
+        return None
+    model_id = str(model_id).strip()
+    for c in choices:
+        if c == model_id or _bare_model_id(c) == model_id:
+            return c
+    return None
+
+
 def _voice_transcript(voice):
     _, texts = relay.list_voice_library(audio_cfg.get("voice_dir", ""))
     return texts.get(voice, "")
@@ -570,8 +584,10 @@ def ui():
                                 label="audio.cpp server URL")
         voice_dir = gr.Textbox(value=audio_cfg.get("voice_dir", ""),
                                label="Voice library dir (/*.wav + prompt_text)")
-        model = gr.Dropdown(choices=_model_choices(audio_cfg["server_url"]),
-                            value=audio_cfg["model"] or None,
+        model_choices = _model_choices(audio_cfg["server_url"])
+        model = gr.Dropdown(choices=model_choices,
+                            value=_model_value(model_choices,
+                                               audio_cfg["model"]),
                             label="TTS model id (from /v1/models)")
         voice = gr.Dropdown(choices=_voice_choices(
             audio_cfg["server_url"], audio_cfg["model"] or None),
