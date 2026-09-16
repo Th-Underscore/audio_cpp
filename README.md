@@ -5,7 +5,7 @@ Streams TTS for text generated in oobabooga's text-generation-webui, synthesized
 ## Quick features
 
 - Streams audio while text is produced by the model (sentence/paragraph chunking mid-generation)
-- Toggle on/off from the UI; finished replies are saved as `.ogg` and appended to the bot message (the player tracks the message by `data-index`, so the attachment stays on its message across re-renders and version navigation)
+- Toggle on/off from the UI; finished replies are saved as `.ogg` and appended to the bot message
 - **Stop voice** button (floating, bottom-right) appears while audio is in flight — hard-interrupts the in-flight synthesis (drops the audio.cpp connection and queued chunks) and stops playback
 - Per-model synthesis options (temperature, top_k/p, guidance, streaming, …) with a **Save** button — persisted to `config.json` and reloaded at startup
 - Voice library auto-fill: pick a voice (`*.wav` + `prompt_text` in the voice dir) and `reference_text` is filled from the prompt
@@ -26,7 +26,7 @@ git clone https://github.com/Th-Underscore/audio_cpp.git
 
 ## Usage
 
-1. **Start the audio.cpp server first.** The extension's discovery hooks run when the web UI opens, so if the server isn't up yet the model/voice dropdowns will be empty. Once it's running, click **Refresh models & voices** in the accordion — it re-fetches the server live.
+1. **Start the audio.cpp server first.** The extension's discovery hooks run when the web UI opens, so if the server isn't up yet the model/voice dropdowns will be empty (static Gradio elements). Once it's running, click **Refresh models & voices** in the accordion — it re-fetches the server live.
 
 2. Launch the web UI with the extension:
 
@@ -53,4 +53,9 @@ The accordion groups settings into **global** (connection, client-side chunking,
 
 ## To-Do
 
+- Improved chunking logic:
+  - More elegant paragraph chunking
+  - Padded silence between chunks
+- Better styling
 - Server startup: a UI control (button/toggle in the accordion) that starts the audio.cpp server process itself, so the web UI no longer has to be opened after the server — the extension would own the server lifecycle (spawn `server -m ...`, wait for `/v1/models`, stop on UI close)
+- Expression rewrite: Insert configurable (expression) tags via LLM per chunk

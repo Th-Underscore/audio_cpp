@@ -9,3 +9,6 @@ outputs/
 
 __pycache__/
 *.pyc
+
+# per-message voice registry (runtime state, server-side source of truth)
+audio_registry.json

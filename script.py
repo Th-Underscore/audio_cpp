@@ -16,6 +16,7 @@ after extension setup() has run).
 
 import os
 import json
+import re
 import time
 import uuid
 import threading
@@ -93,6 +94,7 @@ _DEFAULT_MODEL_OPTS = {
 
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "config.json")
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
 
 audio_cfg = dict(_DEFAULT_GLOBAL)
 audio_cfg.update(_DEFAULT_MODEL_OPTS)
@@ -100,6 +102,8 @@ _model_options = {}   # bare model id -> {synthesis option: value}
 
 _sessions = OrderedDict()   # stream_id -> VoiceSession
 _sessions_lock = threading.Lock()
+_current_stream = None       # stream_id being generated RIGHT NOW
+_registry_lock = threading.Lock()
 _mounted = threading.Event()
 _model_families = {}        # model id -> family (discovery cache)
 
@@ -240,8 +244,15 @@ def _mount_loop():
         if app is not None:
             try:
                 if isinstance(app, FastAPI) and app is not mounted_on:
-                    app.include_router(
-                        relay.make_routes(_sessions, lambda: dict(audio_cfg)))
+                    router = relay.make_routes(
+                        _sessions, lambda: dict(audio_cfg))
+                    # Registry routes added here (they need script.py scope)
+                    # BEFORE include_router: include_router copies the route
+                    # list at call time, so routes added after it would
+                    # exist on the router but never on the live app.
+                    router.get("/voice/registry")(_registry_route)
+                    router.delete("/voice/registry")(_registry_delete_route)
+                    app.include_router(router)
                     mounted_on = app
                     shared.logger.info(
                         "audio_cpp /voice/* routes mounted on %r" % (app,))
@@ -256,6 +267,16 @@ def setup():
     client.set_logger(lambda m: shared.logger.info("audio_cpp: " + m))
     relay.set_logger(lambda m: shared.logger.info("audio_cpp: " + m))
     specs.set_logger(lambda m: shared.logger.info("audio_cpp: " + m))
+    # Register this module as a loaded extension. load_extensions() normally
+    # does this, but only when the extension is in shared.args.extensions;
+    # when enabled another way, history_modifier/custom_generate_reply would
+    # never be dispatched without the state entry.
+    import sys as _sys
+    import modules.extensions as _ext
+    if 'audio_cpp' not in _ext.state:
+        _ext.state['audio_cpp'] = [True, len(_ext.state), _sys.modules[__name__]]
+    # Load the persisted voice registry once (idempotent).
+    _load_registry()
     if not _mounted.is_set():
         threading.Thread(target=_mount_loop, daemon=True).start()
 
@@ -311,9 +332,10 @@ def _thinking_end_tag(state, question):
 
 def _chat_id(state):
     try:
-        ch = getattr(state, "chat", None)
-        if isinstance(ch, dict) and ch.get("id"):
-            return str(ch["id"])
+        return str(state['unique_id'])
+        # ch = getattr(state, "chat", None)
+        # if isinstance(ch, dict) and ch.get("id"):
+        #     return str(ch["id"])
     except Exception:
         pass
     return "nochat"
@@ -340,7 +362,10 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
     end_tag = _thinking_end_tag(state, question)
     with _sessions_lock:
         _sessions[stream_id] = relay.VoiceSession(
-            stream_id, dict(audio_cfg), thinking_end_tag=end_tag)
+            stream_id, dict(audio_cfg), on_file=_pending_file_cb,
+            thinking_end_tag=end_tag)
+        global _current_stream
+        _current_stream = stream_id
     sess = _sessions[stream_id]
     shared.logger.info("audio_cpp: tap: VOICING stream_id=%s chat=%s "
                         "end_tag=%r q=%r"
@@ -366,18 +391,130 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
         shared.logger.info("audio_cpp: tap: base stream ended: %d yields, "
                            "final len=%d" % (n_yield, total_len))
         sess.finish()
-        threading.Thread(target=_reap, args=(stream_id, sess),
+        threading.Thread(target=_reap, args=(stream_id, sess, state),
                          daemon=True).start()
 
 
-def _reap(stream_id, sess):
+def _reap(stream_id, sess, state):
+    """Worker thread: wait for synthesis+opus-save to finish, then record
+    the finished file in the extension-local registry (see _record_audio).
+    The .ogg is only on disk once the relay worker's on_file callback
+    fires, which is AFTER the tap's finally runs — so the recording is
+    done HERE, not in the tap."""
     try:
         while not sess.done_event.is_set():
             time.sleep(0.2)
     except Exception:
         pass
+    _record_audio(stream_id, state)
     with _sessions_lock:
         _sessions.pop(stream_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Voice registry — audio files keyed per message row (client overlay)
+# ---------------------------------------------------------------------------
+# The extension keeps its own voice registry (textgen core stays untouched):
+#   {"assistant_<idx>": {"path": <relpath vs OUT_DIR>, "ts": ...}}
+# persisted in audio_registry.json next to this file. The client mirrors it
+# into localStorage (player.js) and anchors a chip to each matching
+# .message[data-index]. Regenerating a message creates a NEW row (new idx),
+# so a new synthesis records a NEW key — files never stack on one row. The
+# displayed version is read from the DOM for chip labeling only.
+REGISTRY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "audio_registry.json")
+_voice_registry = {}
+
+
+def _load_registry():
+    global _voice_registry
+    try:
+        with open(REGISTRY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _voice_registry = data
+    except Exception:
+        _voice_registry = {}
+
+
+def _save_registry():
+    try:
+        with open(REGISTRY_FILE, "w", encoding="utf-8") as f:
+            json.dump(_voice_registry, f, indent=2, ensure_ascii=False)
+    except Exception:
+        traceback.print_exc()
+
+
+def get_registry() -> dict:
+    """Snapshot of the registry (served by GET /voice/registry)."""
+    with _registry_lock:
+        return {k: dict(v) for k, v in _voice_registry.items()}
+
+
+def _registry_route():
+    return get_registry()
+
+
+def _registry_delete_route(key: str = ""):
+    """DELETE /voice/registry?key=assistant_<uid>_<idx>_<v>
+
+    The registry is per (chat, row, version). Also accepts legacy bare
+    assistant_<idx> keys from old registry files. The client sends the
+    exact key it is anchoring to. Returns {"ok": true, "deleted": <bool>}"""
+    k = (key or "").strip()
+    if re.match(r"^assistant_\d+(?:_\d+)?$", k) or \
+            re.match(r"^assistant_.+?_\d+_\d+$", k):
+        with _registry_lock:
+            deleted = _voice_registry.pop(k, None) is not None
+            if deleted:
+                _save_registry()
+        return {"ok": True, "deleted": deleted}
+    return {"ok": False, "error": "bad key", "deleted": False}
+
+
+def _record_audio(stream_id, state):
+    """Record the stream's finished .ogg under the message row the session
+    belonged to: assistant_<uid>_<idx>_<v>.
+
+    uid = chat unique id (state['unique_id'] — same value the #past-chats
+    Radio and viewing_unique_id use), so audio never bleeds across chats.
+    v = number of versions of that row at recording time: regeneration
+    appends the new version before the stream finishes, so v is exactly the
+    version just synthesized — each version of a row keeps its own file
+    and regenerates add, never overwrite."""
+    if not audio_cfg.get("save_file", True):
+        return
+    try:
+        file_path = None
+        with _sessions_lock:
+            sess = _sessions.get(stream_id)
+        if sess is not None and getattr(sess, "file_path", None):
+            file_path = sess.file_path
+        if not file_path:
+            return
+        if not os.path.exists(file_path):
+            shared.logger.warning("audio_cpp: pending file missing: %s"
+                                   % file_path)
+            return
+        history = state.get("history") if isinstance(state, dict) else None
+        if not history:
+            return
+        idx = len(history.get("internal", [])) - 1
+        if idx < 0:
+            return
+        uid = _chat_id(state)
+        versions = (history.get("metadata", {}) or {}).get(
+            "assistant_%d" % idx, {}).get("versions", [])
+        v = max(len(versions), 1)
+        rel = os.path.relpath(file_path, relay.OUT_DIR)
+        key = "assistant_%s_%d_%d" % (uid, idx, v)
+        with _registry_lock:
+            _voice_registry[key] = {"path": rel, "ts": time.time()}
+            _save_registry()
+        shared.logger.info("audio_cpp: recorded audio %s -> %s"
+                           % (rel, key))
+    except Exception:
+        traceback.print_exc()
 
 
 def _new_stream_id():
@@ -408,6 +545,17 @@ def _base_reply(question, original_question, state, stopping_strings, is_chat):
                        % (model_cls, gen.__name__, is_chat))
     return gen(question, original_question, state, stopping_strings,
                is_chat=is_chat)
+
+def _pending_file_cb(file_path):
+    """VoiceSession.on_file: the .ogg is on disk. Stashed on the session so
+    the reaper (_record_audio) can pick it up AFTER done_event is set."""
+    global _current_stream
+    with _sessions_lock:
+        sess = _sessions.get(_current_stream) if _current_stream else None
+    if sess is not None:
+        sess.file_path = file_path
+    shared.logger.info("audio_cpp: file saved %s (stream %s)"
+                       % (os.path.basename(file_path), _current_stream))
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +777,37 @@ def _persist():
 def custom_css():
     return """
     .audio-cpp-player { margin: 0.5em 0; width: 100%; max-width: 480px; }
+
+    /* Voice overlay: inline audio + delete, anchored under an assistant
+       message's .text. Rendered idempotently by player.js. */
+    .audio-cpp-voice {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0.5em 0 0;
+        width: 100%;
+    }
+    .audio-cpp-voice audio {
+        flex: 1;
+        min-width: 0;
+        max-width: 480px;
+        height: 36px;
+    }
+    .audio-cpp-voice .aac-vlabel {
+        font-size: 0.78em;
+        opacity: 0.7;
+        white-space: nowrap;
+    }
+    .audio-cpp-voice .aac-del {
+        background: none;
+        border: 1px solid rgba(255, 90, 90, 0.5);
+        color: #ff8a8a;
+        border-radius: 6px;
+        font-size: 0.75em;
+        padding: 2px 8px;
+        cursor: pointer;
+    }
+    .audio-cpp-voice .aac-del:hover { background: rgba(255, 90, 90, 0.15); }
     """
 
 

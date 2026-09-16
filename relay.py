@@ -252,7 +252,10 @@ class VoiceSession:
                 file_path = save_opus(pcm_total, sample_rate,
                                        os.path.join(OUT_DIR, fname))
                 if file_path and self.on_file:
-                    self.on_file(file_path)
+                    try:
+                        self.on_file(file_path)
+                    except Exception:
+                        traceback.print_exc()
             except Exception:
                 traceback.print_exc()
         _dbg("[session %s] worker: DONE chunks=%d pcm_total=%dB file=%s"
