@@ -250,7 +250,7 @@ class VoiceSession:
         if len(pcm_total) > 0 and self.cfg.get("save_file", True):
             try:
                 os.makedirs(OUT_DIR, exist_ok=True)
-                fname = "%s_%s.ogg" % (_safe(self.chat_id), int(time.time()))
+                fname = "%s_%s.opus" % (_safe(self.chat_id), int(time.time()))
                 file_path = save_opus(pcm_total, sample_rate,
                                        os.path.join(OUT_DIR, fname))
                 if file_path and self.on_file:

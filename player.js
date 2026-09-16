@@ -223,7 +223,7 @@
     // confirmation, not blind retries; max ~6s.
     async function onSessionDone(fileUrl) {
         const m = fileUrl && fileUrl.match(/path=([^&]+)/);
-        const stem = m ? decodeURIComponent(m[1]).replace(/\.ogg$/, "") : null;
+        const stem = m ? decodeURIComponent(m[1]).replace(/\.(ogg|opus)$/, "") : null;
         console.log("[audio_cpp] session done, file=%s — polling registry", fileUrl);
         for (let i = 0; i < 15; i++) {
             try {
@@ -238,7 +238,8 @@
                     }
                     queueRender();
                     if (!stem || Object.values(j).some(v => v.path &&
-                            v.path.endsWith(stem + ".ogg")))
+                            (v.path.endsWith(stem + ".ogg") ||
+                             v.path.endsWith(stem + ".opus"))))
                         return; // observed the reaper's record
                 }
             } catch (e) { /* server busy; keep polling */ }
@@ -306,9 +307,6 @@
             const div = document.createElement("div");
             div.className = "audio-cpp-voice";
             div.dataset.src = entry.path;
-            const label = document.createElement("span");
-            label.className = "aac-vlabel";
-            label.textContent = v === 1 ? "voice" : "voice v" + v;
             const a = document.createElement("audio");
             a.controls = true;
             a.preload = "metadata";
@@ -332,7 +330,6 @@
                     queueRender();
                 }
             });
-            div.appendChild(label);
             div.appendChild(a);
             div.appendChild(del);
             holder.appendChild(div);

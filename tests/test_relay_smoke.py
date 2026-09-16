@@ -169,8 +169,8 @@ def main():
     print("session pipeline ok: %d audio deltas relayed, stream ended with done" % n_audio)
 
     # verify an opus file was written and is served by /voice/file
-    oggs = [f for f in os.listdir(relay.OUT_DIR) if f.endswith(".ogg")] if os.path.isdir(relay.OUT_DIR) else []
-    assert oggs, "no ogg produced"
+    oggs = [f for f in os.listdir(relay.OUT_DIR) if f.endswith(".opus")] if os.path.isdir(relay.OUT_DIR) else []
+    assert oggs, "no opus produced"
     size = os.path.getsize(os.path.join(relay.OUT_DIR, oggs[0]))
     assert size > 0
     file_url = "http://127.0.0.1:%d/voice/file?path=%s" % (relay_port, oggs[0])

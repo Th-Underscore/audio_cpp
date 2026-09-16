@@ -439,7 +439,7 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
 def _reap(stream_id, sess, state):
     """Worker thread: wait for synthesis+opus-save to finish, then record
     the finished file in the extension-local registry (see _record_audio).
-    The .ogg is only on disk once the relay worker's on_file callback
+    The .opus is only on disk once the relay worker's on_file callback
     fires, which is AFTER the tap's finally runs — so the recording is
     done HERE, not in the tap."""
     try:
@@ -514,7 +514,7 @@ def _registry_delete_route(key: str = ""):
 
 
 def _record_audio(stream_id, state):
-    """Record the stream's finished .ogg under the message row the session
+    """Record the stream's finished .opus under the message row the session
     belonged to: assistant_<uid>_<idx>_<v>.
 
     uid = chat unique id (state['unique_id'] — same value the #past-chats
@@ -588,7 +588,7 @@ def _base_reply(question, original_question, state, stopping_strings, is_chat):
                is_chat=is_chat)
 
 def _pending_file_cb(file_path):
-    """VoiceSession.on_file: the .ogg is on disk. Stashed on the session so
+    """VoiceSession.on_file: the .opus is on disk. Stashed on the session so
     the reaper (_record_audio) can pick it up AFTER done_event is set."""
     global _current_stream
     with _sessions_lock:
@@ -695,7 +695,7 @@ def ui():
         strip_citations = gr.Checkbox(value=audio_cfg["strip_citations"],
                                        label="Strip [1]-style citations")
         save_file = gr.Checkbox(value=audio_cfg["save_file"],
-                                 label="Save finished reply as .ogg")
+                                 label="Save finished reply as .opus")
         thinking_end_tag = gr.Textbox(
             value=audio_cfg["thinking_end_tag"],
             label="Thinking close-tag override (empty = auto-detect)",
