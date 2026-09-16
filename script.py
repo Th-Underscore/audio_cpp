@@ -355,6 +355,24 @@ def _chat_id(state):
     return "nochat"
 
 
+def _is_api_request(state):
+    """True when this reply is being generated for an API (non-UI) client.
+
+    The web UI's interface_state dict always carries 'unique_id' (the
+    #past-chats Radio in ui.py:211, feeding every chatbot_wrapper call),
+    while the API paths (modules/api/completions.py build generate_params
+    from the request body + chat fields, never unique_id) never set it.
+    Absence of 'unique_id' therefore distinguishes API-originated chat
+    generations from browser-originated ones. Missing/odd state -> False
+    (i.e. voice; never suppress voice on an undecidable signal)."""
+    try:
+        if not isinstance(state, dict):
+            return False
+        return not state.get('unique_id')
+    except Exception:
+        return False
+
+
 def custom_generate_reply(question, original_question, state, stopping_strings,
                           is_chat):
     if not (audio_cfg.get("enabled") and audio_cfg.get("model")):
@@ -367,6 +385,14 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
     if not is_chat:
         # Only voice chat-mode bot replies (not raw prompt completion).
         shared.logger.info("audio_cpp: tap: PASS-THROUGH (not chat mode)")
+        yield from _base_reply(question, original_question, state,
+                                stopping_strings, is_chat)
+        return
+
+    if _is_api_request(state):
+        # API (non-UI) request: pure pass-through — no VoiceSession, no
+        # feed/finish, no registry recording.
+        shared.logger.info("audio_cpp: tap: PASS-THROUGH (API request)")
         yield from _base_reply(question, original_question, state,
                                 stopping_strings, is_chat)
         return
