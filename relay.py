@@ -42,11 +42,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import client
 from . import chunker as chunker_mod
+from . import opus_pipe
 from . import preprocessor as preproc_mod
 from . import specs
 
 # Sentinel pushed on the input queue to tell the worker to finish.
 _END = None
+
+_client_opus_capable = False
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
 
@@ -85,20 +88,21 @@ class VoiceSession:
             mode=cfg.get("chunk_mode", "sentence"),
             tag_pairs=cfg.get("chunk_tag_pairs", ""),
         )
-        # TWO queues: the worker consumes `in_q` (chunks to synthesize) and
-        # produces into `out_q` (audio/done events for the browser SSE).
-        # Using one shared queue would let the worker and the SSE reader race.
         self.in_q = queue.Queue()
         self.out_q = queue.Queue()
         self._lock = threading.Lock()
         self._cancelled = False
-        # Set by interrupt() (POST /voice/stop): client.stream_tts checks it
-        # between deltas and closes the in-flight audio.cpp connection.
-        # Owned by the session by default; a caller may pass its own Event.
+        # interrupt()
         self.cancel_event = (cancel_event if cancel_event is not None
                              else threading.Event())
         self.ts = time.time()
         self.done_event = threading.Event()
+        # Live transport is resolved ONCE at session creation (the libopus
+        # probe is cached), then announced on out_q BEFORE the worker can
+        # emit any audio — a client that subscribes after creation always
+        # sees `start` first, so there is no first-event race.
+        self._transport = self._resolve_transport()
+        self.out_q.put(("start", {"transport": self._transport}))
         self._worker = threading.Thread(target=self._run, daemon=True)
         self._worker.start()
         self._n_feed = 0
@@ -183,7 +187,6 @@ class VoiceSession:
         """
         with self._lock:
             self._cancelled = True
-        # Drop every queued chunk (don't synthesize the rest of the reply).
         while True:
             try:
                 self.in_q.get_nowait()
@@ -193,10 +196,39 @@ class VoiceSession:
         self.in_q.put(_END)
         _dbg("[session %s] INTERRUPTED (hard stop): in-flight TTS abort, "
              "queued chunks dropped" % self.chat_id)
-        # Terminal event: the SSE route converts ("stopped", None) into a
-        # `done` with a null file (no opus file exists mid-reply) and breaks.
         self.out_q.put(("stopped", None))
         self.done_event.set()
+
+    # -- transport resolution -------------------------------------------------
+    def _resolve_transport(self):
+        mode = str(self.cfg.get("live_transport", "auto") or "auto").lower()
+        if mode == "force-pcm":
+            _dbg("[session %s] transport resolve: force-pcm -> pcm"
+                 % self.chat_id)
+            return "pcm"
+        try:
+            opus_pipe._get_lib()
+        except Exception as e:
+            if mode == "force-opus":
+                # Hard requirement we cannot honour: degrade with a signal.
+                _dbg("[session %s] force-opus requested but libopus missing "
+                     "(%s); falling back to pcm" % (self.chat_id, e))
+            else:
+                _dbg("[session %s] transport resolve: libopus missing (%s) "
+                     "-> pcm" % (self.chat_id, e))
+            return "pcm"
+        if mode == "force-opus":
+            _dbg("[session %s] transport resolve: force-opus -> opus"
+                 % self.chat_id)
+            return "opus"
+        if _client_opus_capable:
+            _dbg("[session %s] transport resolve: auto + libopus + client "
+                 "opus-capable -> opus" % self.chat_id)
+            return "opus"
+        _dbg("[session %s] transport resolve: auto + libopus but client "
+             "opus cap NOT asserted (no /voice/caps yet) -> pcm"
+             % self.chat_id)
+        return "pcm"
 
     # -- worker thread -------------------------------------------------------
     def _run(self):
@@ -210,6 +242,12 @@ class VoiceSession:
         sample_rate = int(self.cfg.get("sample_rate", 24000))
         file_path = None
         n_chunks = 0
+        use_opus = (self._transport == "opus" and self.cfg.get("save_file", True))
+        pipe = None
+        if use_opus:
+            file_path = os.path.join(OUT_DIR,
+                                      "%s_%s.opus" % (_safe(self.chat_id),
+                                                      int(time.time())))
         while True:
             text = self.in_q.get()
             if text is _END:
@@ -235,7 +273,17 @@ class VoiceSession:
                     cancel_event=self.cancel_event,
                 ):
                     pcm_total.extend(pcm)
-                    self.out_q.put(("audio", b64(pcm)))
+                    if use_opus:
+                        if pipe is None:
+                            pipe = (opus_pipe.OpusEncoderPipe(
+                                file_path, sample_rate,
+                                bitrate=int(self.cfg.get("opus_bitrate", 64000)),
+                            ).start())
+                        for pkt in pipe.feed(pcm):
+                            self.out_q.put(
+                                ("opus", b64(pkt) + "|" + str(len(pkt))))
+                    else:
+                        self.out_q.put(("audio", b64(pcm)))
                 _dbg("[session %s] worker: chunk #%d done, pcm_total=%dB"
                      % (self.chat_id, n_chunks, len(pcm_total)))
             except Exception as e:
@@ -243,11 +291,29 @@ class VoiceSession:
                      % (self.chat_id, n_chunks, e))
                 self.out_q.put(("error", str(e)))
                 continue
+        if pipe is not None:
+            tail, finished_path = pipe.finish()
+            for pkt in tail:
+                self.out_q.put(("opus", b64(pkt) + "|" + str(len(pkt))))
+            if finished_path:
+                file_path = finished_path
+            # Propagate the finished file to the extension reaper — in opus
+            # mode there is no save_opus block to call on_file, so without
+            # this the reaper never records the file in the registry.
+            if file_path and self.on_file:
+                try:
+                    self.on_file(file_path)
+                except Exception:
+                    traceback.print_exc()
+            _dbg("[session %s] worker: opus pipe closed -> %s"
+                 % (self.chat_id, file_path))
         # persist the finished reply as opus
         if len(pcm_total) == 0:
             _dbg("[session %s] worker: finished with ZERO pcm — nothing to save"
                  % self.chat_id)
-        if len(pcm_total) > 0 and self.cfg.get("save_file", True):
+        if use_opus and self.cfg.get("save_file", True) and file_path and not os.path.exists(file_path):
+            file_path = None
+        if not use_opus and len(pcm_total) > 0 and self.cfg.get("save_file", True):
             try:
                 os.makedirs(OUT_DIR, exist_ok=True)
                 fname = "%s_%s.opus" % (_safe(self.chat_id), int(time.time()))
@@ -260,8 +326,9 @@ class VoiceSession:
                         traceback.print_exc()
             except Exception:
                 traceback.print_exc()
-        _dbg("[session %s] worker: DONE chunks=%d pcm_total=%dB file=%s"
-             % (self.chat_id, n_chunks, len(pcm_total), file_path))
+        _dbg("[session %s] worker: DONE chunks=%d pcm_total=%dB file=%s transport=%s"
+             % (self.chat_id, n_chunks, len(pcm_total), file_path,
+                self._transport))
         self.out_q.put(("done", file_path))
         self.done_event.set()
 
@@ -387,6 +454,22 @@ def make_routes(sessions: Dict[str, VoiceSession],
     def health():
         return {"ok": True}
 
+    @router.post("/voice/caps")
+    async def caps(body: dict = None):
+        """Browser capability assertion from player.js: {"opus": true}.
+
+        Sets the module-level capability flag so live_transport=auto
+        resolves opus for NEW sessions (see _resolve_transport). No auth:
+        same-origin local app.
+        """
+        global _client_opus_capable
+        data = body if isinstance(body, dict) else {}
+        if isinstance(data, dict) and bool(data.get("opus")):
+            _client_opus_capable = True
+        _dbg("[route /voice/caps] body=%r -> _client_opus_capable=%s"
+             % (data, _client_opus_capable))
+        return {"ok": True, "opus": _client_opus_capable}
+
     @router.get("/voice/active")
     def active():
         # Newest session whose worker has not finished (in-flight audio).
@@ -444,11 +527,6 @@ def make_routes(sessions: Dict[str, VoiceSession],
                     try:
                         kind, payload = sess.out_q.get(timeout=15)
                     except queue.Empty:
-                        # Quiet window (e.g. slow first TTS call on a cold
-                        # server): keep the SSE connection alive with a
-                        # comment — NEVER treat an empty queue as EOF.
-                        # (This used to be a blanket except -> [DONE] ->
-                        # the browser's stream died before any audio.)
                         n_keepalive += 1
                         _dbg("[route /voice/stream] chat=%s keepalive #%d "
                              "(no event for 15s)" % (chat, n_keepalive))
@@ -458,8 +536,13 @@ def make_routes(sessions: Dict[str, VoiceSession],
                     _dbg("[route /voice/stream] chat=%s ev #%d kind=%s payload_len=%d"
                          % (chat, n_ev, kind,
                             len(payload) if isinstance(payload, str) else -1))
-                    if kind == "audio":
+                    if kind == "start":
+                        ev = {"type": "speech.audio.start",
+                              "transport": payload["transport"]}
+                    elif kind == "audio":
                         ev = {"type": "speech.audio.delta", "audio": payload}
+                    elif kind == "opus":
+                        ev = {"type": "speech.audio.opus", "opus": payload}
                     elif kind == "error":
                         ev = {"type": "error", "error": payload}
                     elif kind == "done":

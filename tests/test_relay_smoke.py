@@ -5,7 +5,8 @@ Verifies, without a real GPU model:
   - make_routes endpoints served on a FastAPI app (same mount the Gradio
     app gets): /voice/health, /voice/active, /voice/stream, /voice/file
   - VoiceSession worker: feed -> synthesize -> out_q audio events -> done
-  - save_opus (ffmpeg libopus) on real PCM
+  - transport flows: pcm (force-pcm baseline) and opus (auto -> libopus
+    pipe; live packets in SSE, file demuxed back to the same packets)
 """
 import base64
 import json
@@ -20,6 +21,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 sys.path.insert(0, ROOT)
 
 from extensions.audio_cpp import client, relay
+
+# set by main() before any session is created
+CFG = {}
 
 
 class MockAudioCpp(BaseHTTPRequestHandler):
@@ -45,11 +49,13 @@ class MockAudioCpp(BaseHTTPRequestHandler):
     def do_POST(self):
         ln = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(ln) or b"{}")
-        # emit two pcm deltas: 200 samples of 0x1111, then 100 of 0x2222
+        # emit two pcm deltas: 2400 samples of 0x1111, then 2400 of 0x2222.
+# 2400 samples @24kHz mono = 4800B = 5 x 20ms frames (960B) each, so the
+# opus path completes real frames (a sub-frame feed yields no packet).
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
-        for i, n in enumerate((200, 100)):
+        for i, n in enumerate((2400, 2400)):
             pcm = bytes([0x11, 0x11]) * n if i == 0 else bytes([0x22, 0x22]) * n
             ev = {"type": "speech.audio.delta", "audio": base64.b64encode(pcm).decode()}
             self.wfile.write(("data: " + json.dumps(ev) + "\n\n").encode())
@@ -81,6 +87,116 @@ def start_routes(app, port):
     raise RuntimeError("routes server did not come up")
 
 
+def run_stream_chat(sessions, port, chat_id, on_file=None):
+    """Feed a session, drain its SSE relay over HTTP, return the raw text."""
+    sess = relay.VoiceSession(chat_id, CFG, on_file=on_file)
+    sessions[chat_id] = sess
+    h = urllib.request.urlopen("http://127.0.0.1:%d/voice/active" % port).read()
+    assert json.loads(h)["active"] == chat_id, h
+    resp = urllib.request.urlopen(
+        "http://127.0.0.1:%d/voice/stream?chat=%s" % (port, chat_id), timeout=15)
+    sse = b""
+    sess.feed("Hello world. How are you?")
+    time.sleep(0.2)
+    sess.finish()
+    deadline = time.time() + 20
+    while b"[DONE]" not in sse:
+        chunk = resp.read(4096)
+        if not chunk:
+            break
+        sse += chunk
+        if time.time() > deadline:
+            break
+    sess.done_event.wait(timeout=5)
+    assert sess.done_event.is_set()
+    assert b"[DONE]" in sse, "stream did not end with [DONE]: %r" % sse[-200:]
+    # out_q fully consumed by the SSE reader
+    events = []
+    while True:
+        try:
+            events.append(sess.out_q.get_nowait())
+        except Exception:
+            break
+    assert events == [], events
+    return sse.decode("utf-8", "replace")
+
+
+def run_opus_flow(sessions, port):
+    print("\n--- opus transport flow ---")
+    # Regression: opus mode must fire on_file when the pipe's finish() writes
+    # the .opus — the reaper records the registry entry from THAT callback
+    # (unlike PCM, where save_opus fires it). Without it, the file is on disk
+    # but never recorded and the client polls the registry for nothing (the
+    # real-world "file not observed in registry after 6s").
+    on_file_calls = []
+    # auto is now gated on the capability assertion; re-post it so this
+    # flow does not depend on execution order against the caps flow above.
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d/voice/caps" % port,
+        data=b'{"opus": true}', method="POST",
+        headers={"Content-Type": "application/json"})
+    assert json.loads(urllib.request.urlopen(req, timeout=5).read())["ok"]
+    text = run_stream_chat(sessions, port, "smoke-opus",
+                           on_file=on_file_calls.append)
+    assert "speech.audio.start" in text, text
+    # start is the FIRST data event and carries the transport
+    ev = json.loads(text.split("data: ")[1])
+    assert ev.get("transport") == "opus", ev
+    n_opus = text.count("speech.audio.opus")
+    assert n_opus >= 1, (n_opus, text)
+    assert '"type": "done"' in text or '"type":"done"' in text, text
+    assert "[DONE]" in text, text
+    print("routes /stream (opus) ok: %dB sse, %d opus packets, start transport=opus"
+          % (len(text), n_opus))
+    # done event carries the file (first-delta commit)
+    assert '"file": "' in text, "done event missing file"
+    oggs = sorted([f for f in os.listdir(relay.OUT_DIR) if f.endswith(".opus")])
+    assert oggs, "no opus produced"
+    size = os.path.getsize(os.path.join(relay.OUT_DIR, oggs[-1]))
+    assert size > 0
+    file_url = "http://127.0.0.1:%d/voice/file?path=%s" % (port, oggs[-1])
+    served = urllib.request.urlopen(file_url, timeout=10).read()
+    assert len(served) == size, (len(served), size)
+    print("opus file ok: %s (%d bytes), /voice/file serves it" % (oggs[-1], size))
+    # the file must demux to >= as many packets as the stream delivered
+    from extensions.audio_cpp import ogg_demux
+    dem = ogg_demux.OggDemuxer()
+    pkts = dem.feed(open(os.path.join(relay.OUT_DIR, oggs[-1]), "rb").read())
+    assert len(pkts) >= n_opus, (len(pkts), n_opus)
+    print("opus file demuxes: %d packets (stream delivered %d)" % (len(pkts), n_opus))
+    # on_file must have fired for the pipe-finished file — this is what
+    # makes the reaper record the entry the client polls for.
+    assert len(on_file_calls) >= 1, "on_file never fired in opus mode"
+    # (oggs[-1] above is the newest file in OUT_DIR, which may belong to the
+    # caps-gate flow that ran earlier — so assert on_file fired for a file
+    # named for THIS session, not the newest file.)
+    assert any(c and os.path.basename(c).startswith("smoke-opus_")
+               and c.endswith(".opus") for c in on_file_calls), on_file_calls
+    print("on_file fired for opus file: %s" % on_file_calls[-1])
+
+
+def _libopus_present():
+    try:
+        from extensions.audio_cpp import opus_pipe
+        opus_pipe._get_lib()
+        return True
+    except Exception:
+        return False
+
+
+def run_pcm_flow(sessions, port):
+    print("\n--- pcm transport flow (force-pcm) ---")
+    CFG["live_transport"] = "force-pcm"
+    text = run_stream_chat(sessions, port, "smoke-pcm")
+    ev = json.loads(text.split("data: ")[1])
+    assert ev.get("transport") == "pcm", ev
+    n_audio = text.count("speech.audio.delta")
+    assert n_audio >= 2, n_audio
+    assert '"type": "done"' in text, text
+    print("routes /stream (pcm) ok: %d pcm deltas relayed" % n_audio)
+    CFG.pop("live_transport", None)
+
+
 def main():
     # --- client tests -------------------------------------------------------
     mock_port = 5099
@@ -97,8 +213,8 @@ def main():
     for pcm in client.stream_tts(base, "breeze-tts-2", "Hello world.",
                                   options={"temperature": 0.9}, voice="femal-001"):
         total.extend(pcm)
-    # 200*2 + 100*2 = 600 bytes
-    assert len(total) == 600, len(total)
+    # 2400*2 + 2400*2 = 9600 bytes
+    assert len(total) == 9600, len(total)
     print("client ok: models=%s voices=%s pcm=%dB" % (models, voices, len(total)))
 
     # --- routes + session test ----------------------------------------------
@@ -107,12 +223,12 @@ def main():
     from fastapi import FastAPI
     app = FastAPI()
     sessions = {}
-    cfg = {
+    CFG.update({
         "server_url": base, "model": "breeze-tts-2", "voice": "femal-001",
         "sample_rate": 24000, "chunk_min_chars": 10, "chunk_max_chars": 40,
         "save_file": True,
-    }
-    app.include_router(relay.make_routes(sessions, lambda: cfg))
+    })
+    app.include_router(relay.make_routes(sessions, lambda: dict(CFG)))
     rsv = start_routes(app, relay_port)
     time.sleep(0.3)
 
@@ -124,52 +240,52 @@ def main():
     assert json.loads(h)["active"] is None
     print("routes /active (none) ok")
 
-    # register a session, feed text, drain
-    sess = relay.VoiceSession("smoke1", cfg)
-    sessions["smoke1"] = sess
-    h = urllib.request.urlopen("http://127.0.0.1:%d/voice/active" % relay_port).read()
-    assert json.loads(h)["active"] == "smoke1", h
-    print("routes /active (smoke1) ok")
-
-    # attach to the live SSE relay over HTTP (browser path)
-    resp = urllib.request.urlopen(
-        "http://127.0.0.1:%d/voice/stream?chat=smoke1" % relay_port, timeout=15)
-    sse = b""
-    sess.feed("Hello world. How are you?")
-    time.sleep(0.2)
-    sess.finish()
-    while True:
-        chunk = resp.read(4096)
-        if not chunk:
-            break
-        sse += chunk
-        if b"[DONE]" in sse:
-            break
-    text = sse.decode("utf-8", "replace")
-    assert "speech.audio.delta" in text, text
-    assert '"type": "done"' in text or '"type":"done"' in text, text
+    # --- caps gate: auto transport -------------------------------------------
+    # auto is server-side gated on the client's opus capability assertion
+    # (player.js probes WebCodecs and POSTs /voice/caps). A fresh page has
+    # not posted caps, so the FIRST auto session must resolve pcm; only
+    # after the caps assertion do NEW sessions resolve opus (libopus present).
+    assert relay._client_opus_capable is False, "caps flag not fresh at test start"
+    text = run_stream_chat(sessions, relay_port, "smoke1")
+    assert "speech.audio.start" in text, text
+    assert '"type": "done"' in text, text
     assert "[DONE]" in text, text
-    print("routes /stream ok: %dB sse, %d deltas" %
-          (len(sse), text.count("speech.audio.delta")))
+    ev = json.loads(text.split("data: ")[1])
+    assert ev.get("transport") == "pcm", ev
+    assert "speech.audio.delta" in text, text
+    assert "speech.audio.opus" not in text
+    if _libopus_present():
+        print("caps gate ok: auto + libopus, w/o /voice/caps -> pcm (%dB sse)"
+              % len(text))
+    else:
+        print("caps gate ok (libopus absent): auto -> pcm (%dB sse)" % len(text))
 
-    sess.done_event.wait(timeout=5)
-    assert sess.done_event.is_set()
+    # POST /voice/caps the way player.js does after a successful probe
+    req = urllib.request.Request(
+        "http://127.0.0.1:%d/voice/caps" % relay_port,
+        data=b'{"opus": true}', method="POST",
+        headers={"Content-Type": "application/json"})
+    caps = json.loads(urllib.request.urlopen(req, timeout=5).read())
+    assert caps == {"ok": True, "opus": True}, caps
+    assert relay._client_opus_capable is True
+    print("routes /voice/caps ok:", caps)
 
-    # NOTE: the SSE endpoint above already consumed out_q (worker produces,
-    # SSE reads). out_q is now empty — that double-observation is expected.
-    events = []
-    while True:
-        try:
-            events.append(sess.out_q.get_nowait())
-        except Exception:
-            break
-    assert events == [], events
-    n_audio = text.count("speech.audio.delta")
-    assert n_audio >= 2, n_audio
-    print("session pipeline ok: %d audio deltas relayed, stream ended with done" % n_audio)
+    if _libopus_present():
+        text = run_stream_chat(sessions, relay_port, "smoke1b")
+        assert "speech.audio.start" in text, text
+        assert '"type": "done"' in text, text
+        assert "[DONE]" in text, text
+        ev = json.loads(text.split("data: ")[1])
+        assert ev.get("transport") == "opus", ev
+        assert "speech.audio.opus" in text, text
+        print("caps gate ok: auto + libopus + /voice/caps -> opus (%dB sse, %d opus pkts)"
+              % (len(text), text.count("speech.audio.opus")))
+    else:
+        print("caps gate (libopus absent): auto stays pcm; opus phase skipped")
 
     # verify an opus file was written and is served by /voice/file
-    oggs = [f for f in os.listdir(relay.OUT_DIR) if f.endswith(".opus")] if os.path.isdir(relay.OUT_DIR) else []
+    oggs = [f for f in os.listdir(relay.OUT_DIR) if f.endswith(".opus")] \
+        if os.path.isdir(relay.OUT_DIR) else []
     assert oggs, "no opus produced"
     size = os.path.getsize(os.path.join(relay.OUT_DIR, oggs[0]))
     assert size > 0
@@ -178,7 +294,13 @@ def main():
     assert len(served) == size, (len(served), size)
     print("opus ok: %s (%d bytes), /voice/file serves it" % (oggs[0], size))
 
-    print("ALL RELAY SMOKE TESTS PASS")
+    # --- opus transport flow --------------------------------------------------
+    run_opus_flow(sessions, relay_port)
+
+    # --- forced pcm flow ------------------------------------------------------
+    run_pcm_flow(sessions, relay_port)
+
+    print("\nALL RELAY SMOKE TESTS PASS")
 
 
 if __name__ == "__main__":

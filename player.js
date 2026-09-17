@@ -68,6 +68,62 @@
         src.start(t);
         return t + samples.length / SAMPLE_RATE;
     }
+    // Opus decode output (Float32Array from AudioData) into the same
+    // playhead path. sampleRate/channels come from the decoded AudioData
+    // (expected 24 kHz mono); mirrors playChunk's scheduling exactly.
+    function playChunkF32(samples, playhead, sampleRate) {
+        if (!samples || samples.length === 0) return playhead;
+        const ac = audioCtx();
+        if (ac.state === "suspended") ac.resume();
+        const sr = sampleRate || SAMPLE_RATE;
+        const buf = ac.createBuffer(1, samples.length, sr);
+        buf.getChannelData(0).set(samples);
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(ac.destination);
+        const t = Math.max(playhead, ac.currentTime + 0.03);
+        src.start(t);
+        return t + samples.length / sr;
+    }
+
+    // --- Opus capability probe (WebCodecs) -----------------------------------
+    // Decides server-side auto resolution: only POST /voice/caps when a real
+    // opus decode config is available. Runs once at load; failures are fatal
+    // to the opus path for this page (streams fall back to pcm server-side).
+    (async function probeOpusCapability() {
+        if (typeof AudioDecoder === "undefined") {
+            console.warn("[audio_cpp] AudioDecoder unavailable — opus incapable; " +
+                         "not posting /voice/caps (auto -> pcm)");
+            return;
+        }
+        let d = null;
+        try {
+            // AudioDecoder REQUIRES an init argument ({output, error}) —
+            // new AudioDecoder() throws. Probe decoder discards output.
+            d = new AudioDecoder({
+                output() { /* probe: decoded data discarded */ },
+                error: (e) =>
+                    console.warn("[audio_cpp] opus capability probe error:", e)
+            });
+            // configure() is async — await it so a rejected configure also
+            // counts as incapable (auto -> pcm).
+            await d.configure({ codec: "opus", sampleRate: SAMPLE_RATE,
+                                 numberOfChannels: 1 });
+            d.close();
+            console.log("[audio_cpp] opus capable (AudioDecoder configured @%d Hz mono)",
+                        SAMPLE_RATE);
+            fetch(RELAY_HOST + "/voice/caps", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ opus: true })
+            }).then(r => r.json().then(j =>
+                console.log("[audio_cpp] /voice/caps posted:", j)))
+              .catch(e => console.warn("[audio_cpp] /voice/caps post failed:", e));
+        } catch (e) {
+            console.warn("[audio_cpp] opus decode config failed — incapable; " +
+                         "auto will resolve pcm: " + e);
+        }
+    })();
 
     // --- Live-session SSE ---------------------------------------------------
     let reattach = 0;
@@ -93,11 +149,35 @@
         let playhead = null;
         let nDeltas = 0;
         let closed = false;
+        // Opus transport (resolved server-side, announced by
+        // speech.audio.start): per-stream decoder + 20 ms packet clock.
+        let opusDecoder = null;
+        let opusIdx = 0;
+        let nOpus = 0;
+        let opusDead = false;
+        function closeOpus() {
+            if (opusDecoder) {
+                try { opusDecoder.flush(); } catch (e) { /* already closing */ }
+                try { opusDecoder.close(); } catch (e) { /* already closed */ }
+            }
+            opusDecoder = null;
+        }
+        // Submit one opus packet to the decoder. decode() resolves with
+        // UNDEFINED — decoded samples arrive asynchronously through the
+        // decoder's output callback (see speech.audio.start setup above),
+        // which feeds them to this stream's playhead via playChunkF32.
+        // Awaiting the submit promise is the natural backpressure (the next
+        // packet is only fed after this resolves).
+        async function decoderDecode(decoder, chunk) {
+            await decoder.decode(chunk);
+        }
         es.onopen = () => console.log("[audio_cpp] stream OPEN for", chatId);
         es.onerror = () => {
             if (closed) return;
             closed = true;
-            console.warn("[audio_cpp] stream error/close, deltas=%d", nDeltas);
+            console.warn("[audio_cpp] stream error/close, deltas=%d opus=%d",
+                         nDeltas, nOpus);
+            closeOpus();
             hideStopBtn();
             allowReattach(chatId);
         };
@@ -105,6 +185,7 @@
             if (e.data === "[DONE]") {
                 closed = true;
                 es.close();
+                closeOpus();
                 hideStopBtn();
                 allowReattach(chatId);
                 return;
@@ -114,7 +195,86 @@
                 console.warn("[audio_cpp] bad SSE payload:", e.data.slice(0, 200));
                 return;
             }
-            if (ev.type === "speech.audio.delta" && ev.audio) {
+            if (ev.type === "speech.audio.start") {
+                if (ev.transport === "opus") {
+                    try {
+                        // AudioDecoder REQUIRES {output, error}. Decoded
+                        // samples arrive ASYNCHRONOUSLY in output(); the
+                        // feed side (decoderDecode) only tracks submit.
+                        opusDecoder = new AudioDecoder({
+                            // Decoded AudioData arrives here (async, in
+                            // decode order, including closeOpus's flush
+                            // tail) -> this stream's playhead, exactly as
+                            // the pcm path.
+                            output: (audio) => {
+                                // AudioData has no getChannelData (that's
+                                // AudioBuffer). Per MDN, copyTo(dest,
+                                // {planeIndex, format}) extracts samples;
+                                // an f32 TypedArray destination yields
+                                // Float32 mono frames directly.
+                                try {
+                                    const buf = new Float32Array(
+                                        audio.numberOfFrames);
+                                    audio.copyTo(buf,
+                                                  {planeIndex: 0,
+                                                   format: "f32"});
+                                    playhead = playChunkF32(
+                                        buf, playhead, audio.sampleRate);
+                                } catch (e) {
+                                    console.warn("[audio_cpp] copyTo failed:",
+                                                 e);
+                                } finally {
+                                    audio.close();
+                                }
+
+                            },
+                            error: (e) => {
+                                opusDead = true;
+                                console.warn("[audio_cpp] opus decoder " +
+                                             "error — stream is pcm-dead:", e);
+                            }
+                        });
+                        opusDecoder.configure({ codec: "opus",
+                                                 sampleRate: SAMPLE_RATE,
+                                                 numberOfChannels: 1 });
+                        console.log("[audio_cpp] opus stream start: decoder " +
+                                    "configured @%d Hz mono", SAMPLE_RATE);
+                    } catch (e) {
+                        opusDecoder = null;
+                        opusDead = true;
+                        console.warn("[audio_cpp] stream is opus but decoder " +
+                                     "unavailable/misconfigured — stream is " +
+                                     "pcm-dead (opus events ignored): " + e);
+                    }
+                }
+            } else if (ev.type === "speech.audio.opus" && ev.opus) {
+                if (opusDead) return;
+                if (!opusDecoder) {
+                    console.warn("[audio_cpp] opus packet before start (or " +
+                                 "decoder missing) — ignoring");
+                    return;
+                }
+                const p = ev.opus.indexOf("|");
+                const b64 = p >= 0 ? ev.opus.slice(0, p) : ev.opus;
+                const bytes = b64ToBytes(b64);
+                nOpus++;
+                if (nOpus === 1 || nOpus % 20 === 0)
+                    console.log("[audio_cpp] %d opus packets, %dB, playhead=%s",
+                                 nOpus, bytes.length,
+                                 playhead ? playhead.toFixed(2) + "s" : "null");
+                // timestamp in microseconds; every packet is exactly 20 ms
+                // at 24 kHz mono, so the packet index IS the clock.
+                const chunk = new EncodedAudioChunk({
+                    type: "key",
+                    timestamp: opusIdx * 20000,
+                    data: bytes
+                });
+                opusIdx++;
+                decoderDecode(opusDecoder, chunk).catch(e => {
+                    console.warn("[audio_cpp] opus decode error:", e);
+                    opusDead = true;
+                });
+            } else if (ev.type === "speech.audio.delta" && ev.audio) {
                 const bytes = b64ToBytes(ev.audio);
                 nDeltas++;
                 if (nDeltas === 1 || nDeltas % 20 === 0)

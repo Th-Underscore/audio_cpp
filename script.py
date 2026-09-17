@@ -64,6 +64,7 @@ _DEFAULT_GLOBAL = {
     "model": "",
     "voice": "",
     "sample_rate": 24000,
+    "live_transport": "auto",
     "request_timeout": 120,
     "chunk_mode": "sentence",
     "chunk_min_chars": 120,
@@ -628,6 +629,10 @@ def ui():
             request_timeout = gr.Number(value=audio_cfg["request_timeout"],
                                          label="TTS request timeout (s)",
                                          precision=0)
+            live_transport = gr.Dropdown(
+                ["auto", "force-opus", "force-pcm"],
+                value=audio_cfg["live_transport"],
+                label="Live transport (auto = opus if the browser supports it)")
 
         # -- synthesis options (PER-MODEL) -----------------------------------
         gr.Markdown("### Synthesis options (per-model)")
@@ -712,6 +717,7 @@ def ui():
             enabled: "enabled", server_url: "server_url",
             voice_dir: "voice_dir", voice: "voice",
             sample_rate: "sample_rate", request_timeout: "request_timeout",
+            live_transport: "live_transport",
             chunk_mode: "chunk_mode", chunk_min_chars: "chunk_min_chars",
             chunk_max_chars: "chunk_max_chars",
             chunk_tag_pairs: "chunk_tag_pairs",
@@ -748,7 +754,8 @@ def ui():
 # and the config save).
 _COERCERS = {
     "enabled": bool, "server_url": str, "voice_dir": str, "model": str,
-    "voice": str, "sample_rate": int, "request_timeout": int,
+    "voice": str, "sample_rate": int, "live_transport": str,
+    "request_timeout": int,
     "chunk_mode": str, "chunk_min_chars": int, "chunk_max_chars": int,
     "chunk_tag_pairs": str,
     "strip_thinking": bool, "strip_markdown": bool, "strip_citations": bool,
