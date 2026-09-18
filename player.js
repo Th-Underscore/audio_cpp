@@ -54,6 +54,12 @@
         for (let i = 0; i < n; i++) out[i] = view.getInt16(i * 2, true) / 32768.0;
         return out;
     }
+    // Gap between streamed chunks. PADDING IS INJECTED SERVER-SIDE (relay
+    // appends gap_ms of silence before every chunk after the first, and
+    // into pcm_total so the saved file carries the same gaps) — the client
+    // must not pad again, that would double the gap per chunk AND insert
+    // silence between every event (deltas are sub-second slices, not
+    // chunks).
     function playChunk(bytes, playhead) {
         if (bytes.length < 2) return playhead;
         const ac = audioCtx();

@@ -230,6 +230,20 @@ class VoiceSession:
              % self.chat_id)
         return "pcm"
 
+    DEFAULT_CHUNK_GAP_MS = 650  # default silence gap between TTS chunks
+
+    def _chunk_gap_bytes(self, sample_rate):
+        """16-bit LE mono silence for the configured chunk_gap_ms (0 = none).
+
+        Injected server-side before every chunk after the first, so it lands
+        in BOTH the live stream and pcm_total (saved file matches what was
+        heard). Configurable via the chunk_gap_ms setting.
+        """
+        ms = int(self.cfg.get("chunk_gap_ms", self.DEFAULT_CHUNK_GAP_MS))
+        if ms <= 0:
+            return b""
+        return b"\x00\x00" * int(sample_rate * ms / 1000)
+
     # -- worker thread -------------------------------------------------------
     def _run(self):
         try:
@@ -259,6 +273,21 @@ class VoiceSession:
                      % (self.chat_id, text[:60]))
                 continue
             n_chunks += 1
+            if n_chunks > 1 and not self._cancelled:
+                silence = self._chunk_gap_bytes(sample_rate)
+                if silence:
+                    pcm_total.extend(silence)
+                    if use_opus:
+                        if pipe is None:
+                            pipe = (opus_pipe.OpusEncoderPipe(
+                                file_path, sample_rate,
+                                bitrate=int(self.cfg.get("opus_bitrate", 64000)),
+                            ).start())
+                        for pkt in pipe.feed(silence):
+                            self.out_q.put(
+                                ("opus", b64(pkt) + "|" + str(len(pkt))))
+                    else:
+                        self.out_q.put(("audio", b64(silence)))
             _dbg("[session %s] worker: synthesizing chunk #%d (%d chars): %r"
                  % (self.chat_id, n_chunks, len(text), text))
             try:

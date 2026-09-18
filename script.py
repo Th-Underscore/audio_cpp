@@ -70,6 +70,7 @@ _DEFAULT_GLOBAL = {
     "chunk_min_chars": 120,
     "chunk_max_chars": 400,
     "chunk_tag_pairs": "",
+    "chunk_gap_ms": 650,
     "strip_thinking": True,
     "strip_markdown": True,
     "strip_citations": True,
@@ -685,7 +686,10 @@ def ui():
         chunk_min_chars = gr.Number(value=audio_cfg["chunk_min_chars"],
                                      label="Min chars per chunk", precision=0)
         chunk_max_chars = gr.Number(value=audio_cfg["chunk_max_chars"],
-                                     label="Max chars per chunk", precision=0)
+                                    label="Max chars per chunk", precision=0)
+        chunk_gap_ms = gr.Number(value=audio_cfg["chunk_gap_ms"],
+                                  label="Silence gap between chunks (ms)",
+                                  precision=0)
         chunk_tag_pairs = gr.Textbox(value=audio_cfg["chunk_tag_pairs"],
                                       label="Chunk tag pairs (empty = defaults () [] <>; e.g. '[] <>')",
                                       interactive=True,
@@ -720,6 +724,7 @@ def ui():
             live_transport: "live_transport",
             chunk_mode: "chunk_mode", chunk_min_chars: "chunk_min_chars",
             chunk_max_chars: "chunk_max_chars",
+            chunk_gap_ms: "chunk_gap_ms",
             chunk_tag_pairs: "chunk_tag_pairs",
             strip_thinking: "strip_thinking", strip_markdown: "strip_markdown",
             strip_citations: "strip_citations", save_file: "save_file",
@@ -757,6 +762,7 @@ _COERCERS = {
     "voice": str, "sample_rate": int, "live_transport": str,
     "request_timeout": int,
     "chunk_mode": str, "chunk_min_chars": int, "chunk_max_chars": int,
+    "chunk_gap_ms": int,
     "chunk_tag_pairs": str,
     "strip_thinking": bool, "strip_markdown": bool, "strip_citations": bool,
     "save_file": bool, "thinking_end_tag": str,
