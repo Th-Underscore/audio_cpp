@@ -14,7 +14,7 @@ Streams TTS for text generated in oobabooga's textgen, synthesized by an externa
 
 ## Requirements
 
-- An audio.cpp server you run yourself (a separate process; this extension only talks to it over HTTP). Default URL `http://127.0.0.1:5023`.
+- An audio.cpp server you run yourself (a separate process; this extension only talks to it over HTTP). Default URL `http://127.0.0.1:8080`.
 - ffmpeg on `PATH` - only to encode **saved** replies (`.pcm` → `.opus`).
 - The **live** Opus stream needs **no ffmpeg and no subprocess**: it's encoded in-process via `ctypes`-bound **libopus** plus a pure-Python Ogg page writer. The only install is the **libopus shared library** on the system (e.g. `libopus0` on Debian/Ubuntu, usually already present; `opus.dll`/`libopus-0.dll` on Windows). The loader tries `opus` / `libopus.so.0` / `libopus.so` / `libopus-0.dll` in turn, overridable with the `AUDIOCPP_LIBOPUS` env var (full path to the `.so`/`.dll`). If libopus isn't found the relay falls back to the PCM transport.
 - `pip install -r extensions/audio_cpp/requirements.txt`
@@ -67,6 +67,7 @@ The accordion groups settings into **global** (connection, client-side chunking,
 ## To-Do
 
 - Better CSS styling
+- "Stop" immediately, not just stop synthesis
 - `ffmpeg`/`libopus` in extension root
 - Direct support for other models
 - Server startup: a UI control (button/toggle in the accordion) that starts the audio.cpp server process itself, so the web UI no longer has to be opened after the server - the extension would own the server lifecycle (spawn `audiocpp_server -m ...`, wait for `/v1/models`, stop on UI close)
