@@ -637,39 +637,43 @@ def ui():
 
         # -- synthesis options (PER-MODEL) -----------------------------------
         gr.Markdown("### Synthesis options (per-model)")
-        temperature = gr.Slider(0.0, 2.0, value=audio_cfg["temperature"],
-                                label="temperature")
-        depth_temperature = gr.Slider(0.0, 2.0,
-                                       value=audio_cfg["depth_temperature"],
-                                       label="depth_temperature")
-        top_k = gr.Number(value=audio_cfg["top_k"], label="top_k",
-                          precision=0)
-        top_p = gr.Slider(0.0, 1.0, value=audio_cfg["top_p"], label="top_p")
-        min_p = gr.Slider(0.0, 1.0, value=audio_cfg["min_p"], label="min_p")
-        guidance_scale = gr.Slider(0.0, 10.0,
-                                   value=audio_cfg["guidance_scale"],
+        with gr.Row():
+            temperature = gr.Slider(0.0, 2.0, value=audio_cfg["temperature"],
+                                    label="temperature")
+            depth_temperature = gr.Slider(0.0, 2.0,
+                                          value=audio_cfg["depth_temperature"],
+                                          label="depth_temperature")
+        with gr.Row():
+            top_k = gr.Slider(-1, 200, value=audio_cfg["top_k"], label="top_k", step=1)
+            top_p = gr.Slider(0.0, 1.0, value=audio_cfg["top_p"], label="top_p")
+            min_p = gr.Slider(0.0, 1.0, value=audio_cfg["min_p"], label="min_p")
+
+        guidance_scale = gr.Slider(0.0, 10.0, value=audio_cfg["guidance_scale"],
                                    label="guidance_scale")
-        max_tokens = gr.Number(value=audio_cfg["max_tokens"],
-                               label="max_tokens", precision=0)
-        seed = gr.Number(value=audio_cfg["seed"], label="seed", precision=0)
+
+        with gr.Row():
+            max_tokens = gr.Number(value=audio_cfg["max_tokens"],
+                                   label="max_tokens", precision=0)
+            seed = gr.Number(value=audio_cfg["seed"], label="seed", precision=0)
+
         instruction = gr.Textbox(value=audio_cfg["instruction"],
-                                  lines=2,
-                                  label="instruction (style/delivery)")
+                                 lines=2, label="instruction (style/delivery)")
         reference_text = gr.Textbox(value=audio_cfg["reference_text"],
-                                     lines=2,
-                                     label="reference_text (auto-filled from "
-                                           "voice library; overridable)")
-        text_chunk_mode = gr.Textbox(value=audio_cfg["text_chunk_mode"],
-                                      label="audio.cpp text_chunk_mode")
-        text_chunk_size = gr.Number(value=audio_cfg["text_chunk_size"],
-                                     label="audio.cpp text_chunk_size",
-                                     precision=0)
-        stream_frames_per_event = gr.Number(
-            value=audio_cfg["stream_frames_per_event"],
-            label="stream_frames_per_event", precision=0)
-        stream_lookahead_margin = gr.Number(
-            value=audio_cfg["stream_lookahead_margin"],
-            label="stream_lookahead_margin", precision=0)
+                                    lines=2,
+                                    label="reference_text (auto-filled from voice library; overridable)")
+        
+        with gr.Row():
+            text_chunk_mode = gr.Textbox(value=audio_cfg["text_chunk_mode"],
+                                         label="audio.cpp text_chunk_mode")
+            text_chunk_size = gr.Number(value=audio_cfg["text_chunk_size"],
+                                        label="audio.cpp text_chunk_size",
+                                        precision=0)
+            stream_frames_per_event = gr.Number(
+                value=audio_cfg["stream_frames_per_event"],
+                label="stream_frames_per_event", precision=0)
+            stream_lookahead_margin = gr.Number(
+                value=audio_cfg["stream_lookahead_margin"],
+                label="stream_lookahead_margin", precision=0)
 
         # synthesis widgets in the SAME order as MODEL_OPTION_KEYS — the model
         # change handler returns values in this order to reload them.
@@ -680,31 +684,33 @@ def ui():
 
         # -- chunking (client-side, global) ----------------------------------
         gr.Markdown("### Chunking (client-side)")
-        chunk_mode = gr.Dropdown(["sentence", "paragraph-greedy", "paragraph-lazy"],
-                                  value=audio_cfg["chunk_mode"],
-                                  label="Chunk mode (client-side)")
-        chunk_min_chars = gr.Number(value=audio_cfg["chunk_min_chars"],
-                                     label="Min chars per chunk", precision=0)
-        chunk_max_chars = gr.Number(value=audio_cfg["chunk_max_chars"],
-                                    label="Max chars per chunk", precision=0)
-        chunk_gap_ms = gr.Number(value=audio_cfg["chunk_gap_ms"],
-                                  label="Silence gap between chunks (ms)",
-                                  precision=0)
-        chunk_tag_pairs = gr.Textbox(value=audio_cfg["chunk_tag_pairs"],
-                                      label="Chunk tag pairs (empty = defaults () [] <>; e.g. '[] <>')",
-                                      interactive=True,
-                                      elem_classes=["audio_cpp_narrow"])
+        with gr.Row():
+            chunk_mode = gr.Dropdown(["sentence", "paragraph-greedy", "paragraph-lazy"],
+                                     value=audio_cfg["chunk_mode"],
+                                     label="Chunk mode (client-side)")
+            chunk_min_chars = gr.Number(value=audio_cfg["chunk_min_chars"],
+                                        label="Min chars per chunk", precision=0)
+            chunk_max_chars = gr.Number(value=audio_cfg["chunk_max_chars"],
+                                        label="Max chars per chunk", precision=0)
+            chunk_gap_ms = gr.Number(value=audio_cfg["chunk_gap_ms"],
+                                     label="Silence gap between chunks (ms)",
+                                     precision=0)
+            chunk_tag_pairs = gr.Textbox(value=audio_cfg["chunk_tag_pairs"],
+                                         label="Chunk tag pairs (empty = defaults () [] <>; e.g. '[] <>')",
+                                         interactive=True,
+                                         elem_classes=["audio_cpp_narrow"])
 
         # -- text preprocessing (global) -------------------------------------
         gr.Markdown("### Text preprocessing (before TTS)")
-        strip_thinking = gr.Checkbox(value=audio_cfg["strip_thinking"],
-                                      label="Strip thinking/reasoning")
-        strip_markdown = gr.Checkbox(value=audio_cfg["strip_markdown"],
-                                      label="Strip markdown/formatting")
-        strip_citations = gr.Checkbox(value=audio_cfg["strip_citations"],
-                                       label="Strip [1]-style citations")
+        with gr.Row():
+            strip_thinking = gr.Checkbox(value=audio_cfg["strip_thinking"],
+                                        label="Strip thinking/reasoning")
+            strip_markdown = gr.Checkbox(value=audio_cfg["strip_markdown"],
+                                        label="Strip markdown/formatting")
+            strip_citations = gr.Checkbox(value=audio_cfg["strip_citations"],
+                                        label="Strip [1]-style citations")
         save_file = gr.Checkbox(value=audio_cfg["save_file"],
-                                 label="Save finished reply as .opus")
+                                label="Save finished reply as .opus")
         thinking_end_tag = gr.Textbox(
             value=audio_cfg["thinking_end_tag"],
             label="Thinking close-tag override (empty = auto-detect)",
