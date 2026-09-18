@@ -1,6 +1,6 @@
 # audio.cpp TTS Extension
 
-Streams TTS for text generated in oobabooga's text-generation-webui, synthesized by an external [audio.cpp](https://github.com/theroar001/audio.cpp) server. Audio starts ~1–2 sentences into a reply, not after it.
+Streams TTS for text generated in oobabooga's text-generation-webui, synthesized by an external [audio.cpp](https://github.com/0xShug0/audio.cpp) server. Audio starts ~1–2 sentences into a reply, not after it.
 
 ## Quick features
 
@@ -16,6 +16,17 @@ Streams TTS for text generated in oobabooga's text-generation-webui, synthesized
 - An audio.cpp server you run yourself (a separate process; this extension only talks to it over HTTP). Default URL `http://127.0.0.1:5023`.
 - ffmpeg on `PATH` (`.pcm` → `.opus` encoding of saved replies)
 - `pip install -r extensions/audio_cpp/requirements.txt`
+
+### Building audio.cpp from source
+
+Not required — just a pointer. Build the CUDA CLI + server targets (V100 = arch 70), then serve the binary:
+
+```bash
+devbuild -r 10g nvidia/cuda:12.9.0-devel-ubuntu24.04 \
+  "scripts/build_linux.sh --backend cuda --target audiocpp_cli --target audiocpp_server --cuda-arch 70"
+
+./build/linux-cuda-release/bin/audiocpp_server
+```
 
 ## Installation
 
@@ -54,7 +65,12 @@ The accordion groups settings into **global** (connection, client-side chunking,
 ## To-Do
 
 - Better CSS styling
-- Server startup: a UI control (button/toggle in the accordion) that starts the audio.cpp server process itself, so the web UI no longer has to be opened after the server — the extension would own the server lifecycle (spawn `server -m ...`, wait for `/v1/models`, stop on UI close)
+- Direct support for other models
+- Server startup: a UI control (button/toggle in the accordion) that starts the audio.cpp server process itself, so the web UI no longer has to be opened after the server — the extension would own the server lifecycle (spawn `audiocpp_server -m ...`, wait for `/v1/models`, stop on UI close)
+- "Notebook" for manually-triggered synthesis
 - Expression AI-rewrite: Insert configurable (expression) tags via LLM per chunk
 - Improved silence padding logic: Noise floor, silence detection -> pad timing, etc.
 - Proper refreshing (currently updates server-side, but if audio.cpp server isn't listening during boot, TTS model id and Voice never get their values client-side)
+- STT
+- Non-UI-dependent API
+- Per-token streaming (like [VibeVoice Realtime TTS](https://github.com/Th-Underscore/vibevoice_realtime))
