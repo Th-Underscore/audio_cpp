@@ -160,7 +160,7 @@ def _load_config():
     # Re-apply the currently selected model's options on top of global so the
     # flat view matches what was saved.
     audio_cfg.update(_model_opts_for(audio_cfg.get("model", "")))
-    shared.logger.info(
+    shared.logger.debug(
         "audio_cpp: loaded config.json (model=%r, %d per-model option sets)"
         % (audio_cfg.get("model"), len(_model_options)))
 
@@ -281,9 +281,9 @@ def _mount_loop():
 
 def setup():
     # wire the debug sinks to textgen's log (visible in the server console)
-    client.set_logger(lambda m: shared.logger.info("audio_cpp: " + m))
+    client.set_logger(lambda m: shared.logger.debug("audio_cpp: " + m))
     relay.set_logger(lambda m: shared.logger.info("audio_cpp: " + m))
-    specs.set_logger(lambda m: shared.logger.info("audio_cpp: " + m))
+    specs.set_logger(lambda m: shared.logger.debug("audio_cpp: " + m))
     # Register this module as a loaded extension. load_extensions() normally
     # does this, but only when the extension is in shared.args.extensions;
     # when enabled another way, history_modifier/custom_generate_reply would
@@ -379,7 +379,7 @@ def _is_api_request(state):
 def custom_generate_reply(question, original_question, state, stopping_strings,
                           is_chat):
     if not (audio_cfg.get("enabled") and audio_cfg.get("model")):
-        shared.logger.info("audio_cpp: tap: PASS-THROUGH (enabled=%s model=%r)"
+        shared.logger.debug("audio_cpp: tap: PASS-THROUGH (enabled=%s model=%r)"
                            % (audio_cfg.get("enabled"), audio_cfg.get("model")))
         yield from _base_reply(question, original_question, state,
                                 stopping_strings, is_chat)
@@ -387,7 +387,7 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
 
     if not is_chat:
         # Only voice chat-mode bot replies (not raw prompt completion).
-        shared.logger.info("audio_cpp: tap: PASS-THROUGH (not chat mode)")
+        shared.logger.debug("audio_cpp: tap: PASS-THROUGH (not chat mode)")
         yield from _base_reply(question, original_question, state,
                                 stopping_strings, is_chat)
         return
@@ -395,7 +395,7 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
     if _is_api_request(state):
         # API (non-UI) request: pure pass-through — no VoiceSession, no
         # feed/finish, no registry recording.
-        shared.logger.info("audio_cpp: tap: PASS-THROUGH (API request)")
+        shared.logger.debug("audio_cpp: tap: PASS-THROUGH (API request)")
         yield from _base_reply(question, original_question, state,
                                 stopping_strings, is_chat)
         return
@@ -411,9 +411,9 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
         _current_stream = stream_id
     sess = _sessions[stream_id]
     shared.logger.info("audio_cpp: tap: VOICING stream_id=%s chat=%s "
-                        "end_tag=%r q=%r"
-                        % (stream_id, _chat_id(state), end_tag,
-                           (question or "")[:80]))
+                       "end_tag=%r q=%r"
+                       % (stream_id, _chat_id(state), end_tag,
+                          (question or "")[:80]))
 
     n_yield = 0
     total_len = 0
@@ -426,7 +426,7 @@ def custom_generate_reply(question, original_question, state, stopping_strings,
             yield output
     except GeneratorExit:
         # Stop button: drain the in-flight synthesis, don't cut it off.
-        shared.logger.info("audio_cpp: tap: GeneratorExit after %d yields "
+        shared.logger.debug("audio_cpp: tap: GeneratorExit after %d yields "
                            "(last len=%d), cancelling" % (n_yield, total_len))
         sess.cancel()
         raise
@@ -554,7 +554,7 @@ def _record_audio(stream_id, state):
         with _registry_lock:
             _voice_registry[key] = {"path": rel, "ts": time.time()}
             _save_registry()
-        shared.logger.info("audio_cpp: recorded audio %s -> %s"
+        shared.logger.debug("audio_cpp: recorded audio %s -> %s"
                            % (rel, key))
     except Exception:
         traceback.print_exc()
@@ -584,7 +584,7 @@ def _base_reply(question, original_question, state, stopping_strings, is_chat):
         gen = text_generation.generate_reply_custom
     else:
         gen = text_generation.generate_reply_HF
-    shared.logger.info("audio_cpp: base dispatch model_class=%s -> %s (is_chat=%s)"
+    shared.logger.debug("audio_cpp: base dispatch model_class=%s -> %s (is_chat=%s)"
                        % (model_cls, gen.__name__, is_chat))
     return gen(question, original_question, state, stopping_strings,
                is_chat=is_chat)
@@ -597,7 +597,7 @@ def _pending_file_cb(file_path):
         sess = _sessions.get(_current_stream) if _current_stream else None
     if sess is not None:
         sess.file_path = file_path
-    shared.logger.info("audio_cpp: file saved %s (stream %s)"
+    shared.logger.debug("audio_cpp: file saved %s (stream %s)"
                        % (os.path.basename(file_path), _current_stream))
 
 
@@ -805,7 +805,7 @@ def _load_model_opts(model_label):
     opts = _model_opts_for(mid)
     for k in MODEL_OPTION_KEYS:
         _set_setting(k, opts[k])
-    shared.logger.info("audio_cpp: loaded per-model synthesis options for %r"
+    shared.logger.debug("audio_cpp: loaded per-model synthesis options for %r"
                        % (mid,))
     return [opts[k] for k in MODEL_OPTION_KEYS]
 
@@ -833,7 +833,7 @@ def _persist():
         json.dump(data, f, indent=4, ensure_ascii=False)
         f.write("\n")
     os.replace(tmp, _SETTINGS_FILE)
-    shared.logger.info(
+    shared.logger.debug(
         "audio_cpp: config saved to %s (global + %d per-model option sets, "
         "active model %r)" % (_SETTINGS_FILE, len(data["models"]), mid))
     return "Saved to config.json (global + %d per-model option sets, " \
