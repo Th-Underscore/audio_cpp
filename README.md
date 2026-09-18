@@ -53,7 +53,8 @@ The accordion groups settings into **global** (connection, client-side chunking,
 
 ## To-Do
 
-- Better styling
+- Better CSS styling
 - Server startup: a UI control (button/toggle in the accordion) that starts the audio.cpp server process itself, so the web UI no longer has to be opened after the server — the extension would own the server lifecycle (spawn `server -m ...`, wait for `/v1/models`, stop on UI close)
 - Expression AI-rewrite: Insert configurable (expression) tags via LLM per chunk
-- Improved padding logic: Noise floor, silence detection -> pad timing, etc.
+- Improved silence padding logic: Noise floor, silence detection -> pad timing, etc.
+- Proper refreshing (currently updates server-side, but if audio.cpp server isn't listening during boot, TTS model id and Voice never get their values client-side)
