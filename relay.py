@@ -292,7 +292,7 @@ class VoiceSession:
                  % (self.chat_id, n_chunks, len(text), text))
             try:
                 for pcm in client.stream_tts(
-                    self.cfg.get("server_url", "http://127.0.0.1:5023"),
+                    self.cfg.get("server_url", "http://127.0.0.1:8080"),
                     self.cfg.get("model") or None,
                     text,
                     options=self._tts_options(),
@@ -477,7 +477,7 @@ def make_routes(sessions: Dict[str, VoiceSession],
             return {}
 
     def _server_url():
-        return _cfg().get("server_url", "http://127.0.0.1:5023")
+        return _cfg().get("server_url", "http://127.0.0.1:8080")
 
     @router.get("/voice/health")
     def health():

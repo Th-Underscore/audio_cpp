@@ -59,7 +59,7 @@ MODEL_OPTION_KEYS = [
 
 _DEFAULT_GLOBAL = {
     "enabled": False,
-    "server_url": "http://127.0.0.1:5023",
+    "server_url": "http://127.0.0.1:8080",
     "voice_dir": "",
     "model": "",
     "voice": "",
