@@ -30,9 +30,11 @@ still under `SOFT_SLACK_FACTOR * max_chars` (hard-coded, no config knob):
 a 450-char sentence with max=400 completes whole; a 700-char one is
 hard-cut.
 
-The preprocessor keeps the prefix-consistency property (clean(a+b) starts
-with clean(a)), so a chunk emitted for a prefix stays a prefix of the full
-clean text and never needs re-synthesizing.
+Preprocessing is prefix-consistent (clean(a+b) starts with clean(a)), with one
+exception: while a code fence is OPEN its raw body stays in the clean, and the
+closing fence collapses it to one space — a DIP, not a regeneration. feed()
+tells the two apart: if the consumed prefix is intact in the new clean, only
+the un-emitted tail is re-drained, so a dip never re-emits spoken text.
 
 All logic here is deterministic and pure — no threads, no I/O — so it can be
 unit-tested in isolation.
@@ -183,6 +185,8 @@ class TextChunker:
         self._buf = ""          # raw tail: not yet recognized as a full sentence
         self._pending = []      # COMPLETE sentences coalescing toward min_chars
         self._clean_len = 0     # length of the cumulative clean text consumed
+        self._clean = ""        # last cumulative clean text fed (dip-integrity check)
+        self._buf_start = 0     # clean offset where _buf begins (consumed-span marker)
         self._finished = False  # True once flush() was called
         self._chunks = []       # finished chunks pending return to the caller
 
@@ -190,15 +194,19 @@ class TextChunker:
         self._buf = ""
         self._pending = []
         self._clean_len = 0
+        self._clean = ""
+        self._buf_start = 0
         self._finished = False
         self._chunks = []
 
     def _drain_new(self, new_text):
         """Consume newly appended clean text; return list of finished chunks.
 
-        Invariant: every returned chunk contains only COMPLETE sentences, so a
-        chunk boundary can never land mid-word."""
+        Every returned chunk contains only COMPLETE sentences, so a chunk
+        boundary can never land mid-word. Advances _buf_start by how much _buf
+        shrank, keeping _buf == clean[_buf_start:] (used by feed() on dips)."""
         self._buf += new_text
+        before = len(self._buf)
         chunks = []
         if self.mode == "sentence":
             chunks.extend(self._drain_sentence())
@@ -206,6 +214,7 @@ class TextChunker:
             chunks.extend(self._drain_paragraph(greedy=True))
         else:  # paragraph-lazy
             chunks.extend(self._drain_paragraph(greedy=False))
+        self._buf_start += before - len(self._buf)
         return chunks
 
     # -- mode: sentence (original implementation, unchanged) ------------------
@@ -396,13 +405,24 @@ class TextChunker:
         """Feed the cumulative CLEAN reply. Returns newly finished chunks."""
         if self._finished:
             return []
-        # cumulative_clean must grow from what we last saw; if a shorter/diff
-        # prefix arrives (rare: regeneration), resync by resetting.
+        # A shorter clean is either (a) a DIP: a region the preprocessor kept
+        # raw while incomplete (open fence body, unclosed [[12]]) collapsed —
+        # the consumed prefix is unchanged, so rebuild _buf from the tail and
+        # re-drain it (a reset would re-emit already-synthesized chunks); or
+        # (b) a true regeneration of already-consumed text: reset as before.
         if len(cumulative_clean) < self._clean_len:
+            idx = self._buf_start
+            if (idx <= len(cumulative_clean)
+                    and cumulative_clean[:idx] == self._clean[:idx]):
+                self._buf = cumulative_clean[idx:]
+                self._clean = cumulative_clean
+                self._clean_len = len(cumulative_clean)
+                return self._drain_new("")
             self.reset()
             self._clean_len = 0
         new_text = cumulative_clean[self._clean_len:]
         self._clean_len = len(cumulative_clean)
+        self._clean = cumulative_clean
         if not new_text:
             return []
         return self._drain_new(new_text)

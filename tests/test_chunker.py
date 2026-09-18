@@ -354,4 +354,42 @@ def test_lazy_does_not_preempt_paragraphs():
     print("lazy-no-preempt ok: %d chunks, sizes %s" % (len(out), [len(x) for x in out]))
 
 
+def test_fence_dip_does_not_reemit():
+    # Regression: an open code fence's raw body sits in the clean, and the
+    # closing fence collapses it to one space — the clean shrinks mid-stream.
+    # feed() must rebuild the un-emitted tail, not reset and re-emit.
+    import re as _re
+    from collections import Counter
+    paul = ("Paul\u2019s voice cut through the dead air on the speakerphone, "
+            "flat and stripped of anything but utility. "
+            "\u201cJohn? I\u2019m at the shelter. Tell me if you see the ground "
+            "move faster than your heart rate.\u201d")
+    fence = ("\n\n```python\n"
+             "def guard(n):\n"
+             "    return n * n if n > 3 else 0\n"
+             "```\n\n"
+             "The line went quiet after that. I waited.")
+    full = paul + fence
+    def words(s):
+        return _re.findall(r"\w+", s, _re.UNICODE)
+    want = Counter(words(pp.clean(full)))
+    for mode in ("paragraph-lazy", "paragraph-greedy"):
+        c = chunker.TextChunker(min_chars=120, max_chars=400, mode=mode)
+        out = []
+        for i in range(0, len(full) + 1):
+            out += c.feed(pp.clean(full[:i]))
+        out += c.flush()
+        have = Counter(words(" ".join(out)))
+        dup = {w: have[w] - want[w] for w in have if have[w] > want[w]}
+        drop = {w: want[w] - have[w] for w in want if want[w] > have[w]}
+        assert not dup, "mode=%s re-emitted (duplicated) words: %s" % (mode, dup)
+        assert not drop, "mode=%s dropped words: %s" % (mode, drop)
+        joined = " ".join(out)
+        assert "guard" not in joined, "mode=%s spoke raw fence body: %r" % (mode, joined)
+    print("fence-dip ok: lazy+greedy, exact-once words, no raw fence, no dup")
+
+
+test_fence_dip_does_not_reemit()
+
+
 test_lazy_does_not_preempt_paragraphs()
